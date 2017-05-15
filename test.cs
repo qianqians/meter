@@ -1,6 +1,6 @@
 /*this caller file is codegen by meter for c#*/
 using System;
-using System.Collections;
+using System.Collections.Generic;
 
 namespace meter
 {
@@ -22,14 +22,24 @@ namespace meter
 
    public class tests
    {
-       public List<test> tests;
+       public List<test> tables;
 
        public tests()
        {
-           tests = new List<test>{
-               new test( 123.0, 12.0, 1.1, false ),
-               new test( 456.0, 45.0, 4.5, true )
+           tables = new List<test>{
+               new test( "123.0", 12, 1.1, false ),
+               new test( "456.0", 45, 4.5, true )
            };
+       }
+
+       static private tests instance;
+       static public tests GetInstance()
+       {
+           if (instance == null)
+           {
+               instance = new tests();
+           }
+           return instance;
        }
    }
 }
