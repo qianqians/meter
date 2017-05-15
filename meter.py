@@ -23,7 +23,7 @@ def excel_meter(xlr, outdir):
 
         code = "/*this caller file is codegen by meter for c#*/\n"
         code += "using System;\n"
-        code += "using System.Collections;\n\n"
+        code += "using System.Collections.Generic;\n\n"
 
         code += "namespace meter\n"
         code += "{\n"
@@ -46,23 +46,41 @@ def excel_meter(xlr, outdir):
         code += "   }\n\n"
         code += "   public class " + table_name + "\n"
         code += "   {\n"
-        code += "       public List<" + meta_name + "> " + table_name + ";\n\n"
+        code += "       public List<" + meta_name + "> tables;\n\n"
         code += "       public " + table_name + "()\n"
         code += "       {\n"
-        code += "           " + table_name + " = new List<" + meta_name + ">{\n"
+        code += "           tables = new List<" + meta_name + ">{\n"
         for n in xrange(2, tables[i].nrows):
             code += "               new " + meta_name + "("
             for m in xrange(tables[i].ncols):
+                k,v = elem[m]
+                if v == "string":
+                    code += " \"" + str(tables[i].cell(n,m).value) + "\""
+                if v == "int":
+                    code += " " + str(int(tables[i].cell(n,m).value))
+                if v == "bool":
+                    code += " " + str(tables[i].cell(n,m).value)
+                if v == "float":
+                    code += " " + str(tables[i].cell(n,m).value)
                 if m < (tables[i].ncols - 1):
-                    code += " " + str(tables[i].cell(n,m).value) + ","
+                    code += ","
                 else:
-                    code += " " + str(tables[i].cell(n,m).value) + " "
+                    code += " "
             if n < (tables[i].nrows - 1):
                 code += "),\n"
             else:
                 code += ")\n"
         code += "           };\n"
-        code += "       }\n"
+        code += "       }\n\n"
+        code += "       static private " + table_name + " instance;\n"
+        code += "       static public " + table_name + " GetInstance()\n"
+        code += "       {\n"
+        code += "           if (instance == null)\n"
+        code += "           {\n"
+        code += "               instance = new " + table_name + "();\n"
+        code += "           }\n"
+        code += "           return instance;\n"
+        code += "       }\n"      
         code += "   }\n"
         code += "}\n"
 
