@@ -61,7 +61,7 @@ def excel_meter(xlr, outdir):
                 if v == "bool":
                     code += " " + str(tables[i].cell(n,m).value)
                 if v == "float":
-                    code += " " + str((float)tables[i].cell(n,m).value)
+                    code += " (float)" + str(tables[i].cell(n,m).value)
                 if m < (tables[i].ncols - 1):
                     code += ","
                 else:
