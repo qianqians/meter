@@ -59,21 +59,18 @@ def excel_meter(xlr, outdir):
         meta_name = tables[i].name
 
         elem = []
-        all_check_no = False
         for n in range(tables[i].ncols):
-            cs_check = str(tables[i].cell(1, n).value)
-            check = (cs_check.find('s') != -1)
-            if not check:
-                check = (cs_check.find('S') != -1)
-            if check:
-                all_check_no = True
-            elem.append((check, deleteNoneSpacelstrip(tables[i].cell(0,n).value), deleteNoneSpacelstrip(tables[i].cell(2,n).value)))
-
-        if not all_check_no:
-            continue
+            k = tables[i].cell(0,n).value
+            if type(k) == str:
+                k = deleteNoneSpacelstrip(k)
+            v = tables[i].cell(1,n).value
+            if type(v) == str:
+                v = deleteNoneSpacelstrip(v)
+            print(k, v)
+            elem.append((k, v))
 
         json_obj = {}
-        for n in range(3, tables[i].nrows):
+        for n in range(2, tables[i].nrows):
             json_sub = {}
 
             cell = tables[i].cell(n,0)
@@ -85,9 +82,7 @@ def excel_meter(xlr, outdir):
             else:
                 json_obj[str(tables[i].cell(n,0).value)] = json_sub
             for m in range(tables[i].ncols):
-                check, k,v = elem[m]
-                if not check:
-                    continue
+                k,v = elem[m]
                 
                 cell = tables[i].cell(n,m)
                 ctype = cell.ctype
@@ -108,6 +103,7 @@ def excel_meter(xlr, outdir):
                     else:
                         value = str(value)
                 if v == "int":
+                    print(value)
                     if value == "":
                         value = 0
                     else:
