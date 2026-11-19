@@ -1,0 +1,86 @@
+syntax = "proto3";
+
+// RPC 信封：**每一帧 payload 的唯一形状**（帧头 4 字节在外层，不是 proto）。
+//
+// 设计依据见 docs/protocol-map.md §4.5：
+//   · 帧头只做纯传输分帧（压缩位 + 长度），不带类型/路由/序号
+//   · 路由靠 gate 的会话表（连接 → entity → 逻辑节点）
+//   · 类型靠这里的 method code（整数，不是字符串）
+//   · 请求-响应配对靠 callback_id
+//
+// 为什么 msg_type 用 uint32 而不是 proto enum：protoc-gen-es 会把 proto enum
+// 生成为真正的 TS `enum`，而 core 开了 erasableSyntaxOnly 会直接 TS1294 编不过
+// （实测见 docs/protocol-map.md §4.5.1）。这里是框架内部标签，取值语义由本文档定义。
+
+package fw;
+
+option go_package = "meter/schema/pb;pb";
+
+// msg_type 的取值（不在 schema 里定义 enum——见下面理由）：
+//   0 = MSG_NONE      未设置 / 非法，收到即丢弃并计数（fail-fast，不猜）
+//   1 = MSG_REQUEST   请求，必须有 callback_id > 0
+//   2 = MSG_RESPONSE  响应，callback_id 原样回填；status 见 common.ErrorCode
+//   3 = MSG_NOTIFY    单向通知/推送，callback_id 必须为 0
+//
+// 为什么连这个 enum 都不写进 schema：protoc-gen-es 会把 proto enum 生成为**真正的 TS `enum`**，
+// 而只要 core 里还有 `erasableSyntaxOnly`，那个文件就直接 TS1294 编不过（实测见
+// docs/protocol-map.md §4.5.1）。这几个常量由 schema/methods.yaml 生成两边的 const，成本几乎为零。
+
+message Envelope {
+  // 消息类型，取上面 MSG_* 的值。
+  uint32 msg_type = 1;
+
+  // 方法码，见 schema/methods.yaml（框架面已分配 0x00xx–0x0Cxx，功能域从 0x10xx 起）。
+  uint32 method = 2;
+
+  // 请求-响应配对：
+  //   REQUEST  → 发送方填（>0，连接内单调递增，在途期间不复用）
+  //   RESPONSE → 原样回填请求里的值
+  //   NOTIFY   → 必须为 0
+  uint32 callback_id = 3;
+
+  // 仅 RESPONSE 使用：0 = 成功（proto3 下不占字节）；非 0 见 common.ErrorCode。
+  uint32 status = 5;
+
+  // 具体消息的 protobuf 编码。类型由 (msg_type, method) 决定。
+  bytes body = 4;
+
+  // 6–15 保留：trace id、灰度标签、压缩后的 body……一律通过新增字段扩展，
+  // 永远不要再往 4 字节帧头里加东西。
+  reserved 6 to 15;
+}
+
+// 内部链路（gate ⇄ logic / logic ⇄ dbproxy / logic ⇄ logic）共用的外层。
+//
+// 为什么单独一层而不是给 Envelope 加字段：Envelope 是**客户端可见**的形状，
+// 任何客户端可控的字段都不该参与服务端路由；路由信息放在这里，客户端碰不到。
+message InternalEnvelope {
+  // 发起的节点（日志/链路追踪用；不参与路由决策）。
+  string src_node = 1;
+
+  // 本条消息的目的节点；空表示"由接收方按 dst_entity 自行查找"。
+  string dst_node = 2;
+
+  // 目的实体（仅 logic ⇄ logic 的跨实体调用需要）。
+  uint64 dst_entity = 3;
+
+  // 链路追踪 id（可空）。框架只负责透传，不解析。
+  string trace_id = 4;
+
+  // 被搬运的信封。可能是客户端的 Envelope 字节（gate 透传上行），
+  // 也可能是服务端自己生成的 InternalPayload。
+  bytes payload = 5;
+
+  reserved 6 to 15;
+}
+
+// 内部链路的负载（放在 InternalEnvelope.payload 里）。
+// 与 Envelope 同构，但带内部才有的调用方/被调用方语义。
+message InternalPayload {
+  uint32 msg_type = 1;      // 同 MSG_* 取值
+  uint32 method = 2;        // 见 schema/methods.yaml 的 0x0A/0x0B/0x0C 段
+  uint32 callback_id = 3;
+  uint32 status = 4;
+  bytes body = 5;
+  reserved 6 to 15;
+}

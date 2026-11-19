@@ -1,0 +1,8 @@
+{
+  "compilerOptions": {
+    "target": "ES2022", "module": "ESNext", "moduleResolution": "bundler",
+    "strict": true, "noEmit": true, "skipLibCheck": true,
+    "erasableSyntaxOnly": true, "verbatimModuleSyntax": true
+  },
+  "include": ["../gen/esenv/envelope_pb.ts"]
+}

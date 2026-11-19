@@ -1,0 +1,82 @@
+syntax = "proto3";
+
+// 框架公共定义：标识、错误码、通用包装。
+//
+// ⚠️ 范围纪律：本目录（schema/pb/）只放**底层框架协议**——连接、会话、路由、投递、存储原语。
+// 业务功能（背包、任务、战斗、商城、社交……）的 proto 一律**不在此处生成**，等框架定稿后再加。
+//
+// 对照 abelkhan（qianqians/abelkhan，LGPL-2.1，C# 实现，gate+hub+dbproxy）：
+//   它的 proto/ 是 client.proto / common.proto / gate_client.proto / hub_gate.proto / hub_hub.proto。
+//   本仓库的对应关系见同目录 README.md 的对照表；结构上有意保持同一个形状，语言与传输不同。
+
+package fw;
+
+option go_package = "meter/schema/pb;pb";
+
+// ---------------------------------------------------------------------------
+// 标识
+// ---------------------------------------------------------------------------
+
+// 会话 id：gate 分配，连接存续期内唯一。跨进程传递时用它定位连接。
+message SessionId {
+  uint64 value = 1;
+}
+
+// 逻辑节点 id：一个逻辑进程（或一个场景分片）的稳定标识。
+message NodeId {
+  string value = 1;   // 形如 "logic-a:7001"，由部署配置给定，不从 IP 推导
+}
+
+// 目标实体：客户端视角的"我要操作谁"。
+// 注意：客户端上行**不需要**填这个（gate 的会话表已经知道连接对应哪个 entity）；
+// 它只出现在逻辑层内部的跨实体调用里。
+message EntityRef {
+  uint64 id = 1;
+}
+
+// ---------------------------------------------------------------------------
+// 通用包装
+// ---------------------------------------------------------------------------
+
+message Empty {}
+
+// 原样透传的一段字节。用于 gate 转发客户端 Envelope 时**不解析**其内容。
+message Bytes {
+  bytes value = 1;
+}
+
+// ---------------------------------------------------------------------------
+// 错误码（框架级）
+// ---------------------------------------------------------------------------
+//
+// 只放"框架自己会返回"的错误。业务错误由各功能的 schema 自己定义，不进这里。
+// 用 int32 而不是 enum：错误码会跨版本、跨语言被记录与比对，保持纯数值最省事，
+// 且避免 protoc-gen-es 生成 TS `enum`（与 core 的 erasableSyntaxOnly 冲突，见
+// docs/protocol-map.md §4.5.1）。
+//
+// 0 表示成功 —— proto3 下 0 值不占字节。
+message ErrorCode {
+  // 约定（数值即契约，已分配的不要改语义）：
+  //   0      OK
+  //   1      UNKNOWN               未分类内部错误
+  //   2      TIMEOUT               请求超时（必应带 callback_id 回包）
+  //   3      NOT_AUTHED            未登录 / 会话已失效
+  //   4      DUPLICATE_LOGIN       同账号重复登录（旧连接将被踢）
+  //   5      KICKED                被服务端踢下线（原因见 LastError.detail）
+  //   6      VERSION_MISMATCH      协议版本不兼容，需升级客户端
+  //   7      NOT_FOUND             目标实体/节点不存在（可能已下线或迁移）
+  //   8      RATE_LIMITED          触发限流
+  //   9      PAYLOAD_TOO_LARGE     单帧超过上限（见帧头 len 约束）
+  //   10     BAD_FRAME             帧头/信封/编码解不开
+  //   11     TARGET_BUSY           目标节点过载或正在迁移
+  //   12     STORAGE_CONFLICT      存储版本冲突（见 logic_dbproxy.proto 的 Cas）
+  //   13     OVERLOADED            整个 gate 拒绝新连接
+  // 1000 以上留给各功能域自行分配，框架不解释。
+  int32 code = 1;
+
+  // 人类可读，只用于日志与排查，客户端**不要**依赖其内容做判断。
+  string detail = 2;
+
+  // 可选的补充数据（例如版本协商的双方范围），无则留空。
+  bytes extra = 3;
+}

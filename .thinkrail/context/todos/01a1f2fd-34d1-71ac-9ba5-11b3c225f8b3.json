@@ -228,7 +228,75 @@
           "commitSubject": "docs: 交叉引用服务端技术栈与 abelkhan 评估"
         }
       ]
+    },
+    {
+      "id": "t_803672cf41fa",
+      "title": "生成底层框架 proto（对标 abelkhan）",
+      "todos": [
+        {
+          "id": "t_a099616d211c",
+          "title": "写 schema/pb 下的框架协议",
+          "status": "done",
+          "origin": "agent",
+          "createdAt": "2026-11-19T12:29:01.672Z",
+          "updatedAt": "2026-11-19T12:32:38.365Z",
+          "note": "envelope / common / client_gate / gate_logic / logic_dbproxy + methods.yaml；只做框架面，不含背包/任务/战斗等功能消息",
+          "summary": "新增 `schema/`——本仓库第一批真正的协议产物，只做**底层框架面**，业务消息（背包/任务/战斗/商城/社交）一个都没生成。\n\n**6 个 proto**（结构对标 abelkhan 的 `proto/`，对照表写在 `schema/README.md`）：\n- `common.proto` — 标识 / 框架错误码（int32 而非 enum）/ 通用包装\n- `envelope.proto` — `Envelope`（客户端可见：msg_type/method/callback_id/status/body + reserved 6–15）与 `InternalEnvelope` / `InternalPayload`（内部链路，路由信息放这里，客户端碰不到）\n- `client_gate.proto` ↔ abelkhan `client.proto`+`gate_client.proto`：Hello/HelloAck、Auth、Resume、Logout、Ping/Pong、Kicked、ErrorNotify\n- `gate_logic.proto` ↔ `hub_gate.proto`：SessionBind/Unbind/Rebind/Kick、DeliverUpstream/Downstream/Batch、NodeLoadReport、GateDrain\n- `logic_dbproxy.proto` — abelkhan 没有这一层（它 hub 直连 Mongo）：存储原语不透明 key/value + 版本 CAS，明确写清\"非事务\"\n- `logic_logic.proto` ↔ `hub_hub.proto`：节点注册/心跳/下线、实体迁移两阶段、跨实体调用、频道扇出\n\n**与 abelkhan 的两处刻意不同**（写进 README）：① 类型在 `Envelope.method` 而不是包头 msgId（帧头只有 4 字节，路由靠 gate 会话表）；② 帧头与传输解耦，将来上 UDP/QUIC 时四层协议原样复用。\n\n**唯一源**：`schema/methods.yaml` 登记 33 个框架 method（`0x00xx`–`0x0Cxx`）+ msg_type 常量 + 段划分 + `retired:` 墓碑，由 `gen-methods.mjs` 生成 TS const 与 Go 常量。\n\n**一条命令验证**：`./schema/check.sh` = protoc 编译 → protoc-gen-go → protoc-gen-es → 生成常量 → 打 bundle → 12 条结构断言。全部通过，其中最关键的两条是「gate 透传后内层字节逐字节相同（没有二次编码）」和「生成的 TS 里没有 `export enum`」（守住 core 的 erasableSyntaxOnly）。\n\n顺手修了 `gen-es.mjs` 的一个真 bug：插件路径原先相对 CWD 解析，从 `schema/` 调用就找不到 `@bufbuild/protoc-gen-es`，改成相对该文件自身解析。",
+          "verification": "- `./schema/check.sh` → 12 条结构断言全过；产出 Go 7 个文件 / TS 6 个文件 / bundle 154,610 B\n- `protoc -I schema/pb --descriptor_set_out --include_imports` 6 个 proto → 编译通过\n- `protoc-gen-go` → `client_gate.pb.go`…`logic_logic.pb.go` 共 6 个\n- `protoc-gen-es`（经 gen-es.mjs）→ 6 个 `*_pb.ts`，`grep \"export enum\"` → 无匹配\n- 断言抽样：`status=0` 时被省略（响应 29 B）、`NOTIFY` 的 callback_id=0 省略（5 B）、gate 透传内外层字节逐字节相同\n- `git status -uall` → `schema/.gen/` 未入库（.gitignore 生效）；清掉两个由 shell 引号事故产生的零字节垃圾文件",
+          "commitSubject": "schema: 新增框架面 proto 与 codegen 校验",
+          "artifacts": [
+            {
+              "kind": "change",
+              "path": "schema/.gitignore"
+            },
+            {
+              "kind": "change",
+              "path": "schema/check.sh"
+            },
+            {
+              "kind": "change",
+              "path": "schema/gen-methods.mjs"
+            },
+            {
+              "kind": "change",
+              "path": "schema/methods.yaml"
+            },
+            {
+              "kind": "change",
+              "path": "schema/pb/client_gate.proto"
+            },
+            {
+              "kind": "change",
+              "path": "schema/pb/common.proto"
+            },
+            {
+              "kind": "change",
+              "path": "schema/pb/envelope.proto"
+            },
+            {
+              "kind": "change",
+              "path": "schema/pb/gate_logic.proto"
+            },
+            {
+              "kind": "change",
+              "path": "schema/pb/logic_dbproxy.proto"
+            },
+            {
+              "kind": "change",
+              "path": "schema/pb/logic_logic.proto"
+            },
+            {
+              "kind": "change",
+              "path": "schema/README.md"
+            },
+            {
+              "kind": "change",
+              "path": "schema/verify.mjs"
+            }
+          ]
+        }
+      ]
     }
   ],
-  "summary": "## Summary\n\n回答\"protobuf TS 用哪个库\"，并把三个凭记忆不该下的判断全跑成了实测：**`erasableSyntaxOnly` 兼容性、读写性能、客户端包体**。结论是 **`@bufbuild/protobuf` v2（protobuf-es）**，但带两条反直觉的修正。\n\n四条实质结论：\n\n1. **protobuf-es 兼容 `core` 的\"零编译步骤\"约束**：生成的 `state_pb.ts` 是 type-only interface + `MessageSchema` 常量，无 `enum`/`class`/`namespace`；`tsc --erasableSyntaxOnly --verbatimModuleSyntax --strict` → **exit 0**。但这条判据**不区分**两个库——protobufjs 的 `pbts` 声明也能过（ambient namespace 合法）；protobufjs 真正的冲突是它的**运行时是 CommonJS**（必须 `createRequire` 才能进 ESM）。\n2. **protobuf-es 并不普遍更快**：AoS（1000 个小 message）encode 1416–1462 µs / read 846–876 µs，**比 protobufjs 慢 1.5×**（747–761 / 586–589）——因为它把每个 message 的默认字段都填满；只有 packed 标量数组快 **2.7×**（read 176–181 vs 484–498）。所以\"换新库买性能\"在 AoS 路径上不成立。\n3. **包体是客户端的主要代价**：protobuf-es 100.5 KB min / **27.7 KB gzip**，protobufjs 70.6 / 16.0，**flatbuffers 23.6 / 4.1**。对 Cocos/小游戏，为状态同步引入任何 protobuf 库都不划算。\n4. **三种实现字节流完全一致**（50433 / 34006）：protoc-gen-go、protobufjs、protobuf-es 产出同一个 wire format——这既是这次的验收条件，也说明\"换库\"不会悄悄改变线上协议。\n\n落地结论已写进文档：**服务端/RPC/落库 → protobuf-es v2**（bigint 原生、纯 ESM、零 `Long` 坑）；**客户端状态同步 → FlatBuffers**（4.1 KB gzip、104 µs/1000 实体），只为中低频 RPC 才引 protobuf-es 并认 +11.7 KB gzip；**protobufjs 只在\"必须运行时动态加载 `.proto`\"时留用**。\n\n## Changes\n\n- **`docs/server-engine-stack.md`**：新增 **§8.3「TS 侧到底用哪个 protobuf 库」**（三条判据对照 + 性能表 + 反直觉解释 + 三条结论 + Windows codegen 坑）；§4 加一条交叉引用（\"三种方式消费\"这条要求会传导到库选择上）；§8.2 里 protobuf 那两行改名为 `protobufjs` 以免混淆。\n- **`spikes/ser-compare/`**：\n  - `gen-es.mjs` —— **绕过 Windows 上\"protoc/buf 要求插件是可执行文件而 npm 只给 .cmd\"** 的问题：protoc 只出 `FileDescriptorSet`，自己构造 `CodeGeneratorRequest` 喂插件 stdin、读回 `CodeGeneratorResponse` 写文件。\n  - `es-entry.ts` + `es-check/tsconfig.json` —— protobuf-es 的打包入口与 erasable 断言。\n  - `bench-ts.mjs` 加 protobuf-es AoS/SoA 两个变体（原生 bigint，无需 protobufjs 那套 string 转换）。\n  - `build.sh` 补上 `gen-es.mjs`、`pbes.mjs` 与三份包体产物；`README.md` 补 protobuf-es 小节、验证命令、codegen 坑。\n- **`spikes/README.md` / 根 `README.md`**：断言表与段落同步三条结果。\n- **清掉了失败尝试的残留**：`buf.yaml` / `buf.gen.yaml`（buf 同样无法调用 .cmd 插件）、`es-check-pbjs/`（结论已写进文档，但目录无法被 `build.sh` 重放）。\n- 依赖新增 `@bufbuild/protobuf@2`、`@bufbuild/protoc-gen-es@2`、`@bufbuild/buf@1`（后者最终没用于生成，仅在排查中试过）。\n\n## Testing\n\n- `node spikes/ser-compare/gen-es.mjs` → 写出 `gen/es/state_pb.ts`（7,049 bytes）；`grep \"enum |class |namespace\"` → 无匹配\n- `npx -p typescript@5.9 tsc -p spikes/ser-compare/es-check` → **exit 0**（erasable + verbatim + strict）\n- `node spikes/ser-compare/bench-ts.mjs 1000 200` ×3 → 六组变体全部出数，轮间 < 3%，bytes 列与 Go 侧逐行一致\n- `esbuild --bundle --minify` + zlib level 9 → 100.5/27.7 KB、70.6/16.0 KB、23.6/4.1 KB\n- `bash -n build.sh` → 语法 ok；清空 `gen/` 后全链路重建成功\n- 链接校验（4 个 markdown）→ 全部存在；`git status -uall` → 无 `gen/`、`node_modules/`、`*.exe`、`state.pb.go` 漏进仓库"
+  "summary": "## Summary\n\n这个 plan 从\"继承上一个会话\"开始，把一份**服务器引擎技术栈**的设计从口头结论推进到了\"有实测、有协议、有验证脚本\"的状态。整条链是：先固化技术栈 → 用可复现的基准逐个推翻/确认关键判断 → 据此定协议分工与帧头 → 最后真的把框架面 proto 生成出来。\n\n沿途被自己实测推翻的判断有六处，都保留在文档里（这是本仓库的纪律）：\n1. \"Python 地板比 V8 慢 79×、Cython 只有裸指针能追平\" → 第一版基准把 `list→ndarray` 转换算进了循环；修正后 memoryview 0.79–0.82 ≈ numpy 0.89 ≈ V8 0.85–0.97。\n2. \"CPU 有两个数量级余量\" → 实测只有 1.5–9×（逻辑层骨架 11.1% 单核，含 3× 未建模折算 33.2%）。\n3. \"每帧广播用 FlatBuffers\" → 换成 protobuf SoA 后读成本 585→176 ns/实体，FB 只剩 4 µs/帧（0.03% 预算）的优势；压测后字节差也从 107% 缩到 5%。结论改为 **protobuf-first**。\n4. \"protobuf-es 生成的真 TS 没有 enum，所以兼容 erasableSyntaxOnly\" → 只在 schema 无 enum 时成立；`.proto` 一写 enum 就 `TS1294`。\n5. \"protobuf-es 比 protobufjs 快\" → AoS 路径上反而慢 1.5%；只有 packed 数组快 2.7%。\n6. \"帧头需要 msgId/域/seq/扩展块\" → 用户指出路由靠 gate 会话表、类型走 RPC method、配对靠 callback_id，帧头因此可以缩到 **4 字节**（压缩位 + 长度）。\n\n最重要的两条结构性结论：**语义全部放 payload（Envelope），帧头永远不用改**；**\"能跑一小时\"比\"跑得快\"更值得先测**（`soak.mjs` 已写好并在跑，判据先于结果固定）。\n\n## Changes\n\n- **文档（7 份，新增 2 份）**：新增 [`docs/server-engine-stack.md`](docs/server-engine-stack.md)（定稿技术栈 + 需求收敛史 V1→V6 + 三层 CI 规矩 + §8.1 S1 / §8.2 S2 / §8.3 protobuf 库选型 / §8.4 Node vs Bun 运行时对比）与 [`docs/protocol-map.md`](docs/protocol-map.md)（三档判据、链路与消息族清单、**4 字节帧头**、RPC 信封、压缩策略、P0–P4 路线、13 条帧头验收测试）。`mmorpg-engine-choice.md` 的 §5/§7/§8 从结论降为**条件命题**（前提已被改写），正文一字未改以保留 abelkhan 的一手核实。\n- **`schema/`（本仓库第一批协议产物）**：6 个框架面 proto（`common` / `envelope` / `client_gate` / `gate_logic` / `logic_dbproxy` / `logic_logic`）+ `methods.yaml`（33 个 method code，唯一源）+ `check.sh`（codegen 全链路）+ `verify.mjs`（12 条结构断言）+ `gen-methods.mjs`。**业务消息按需求暂不生成**。结构对标 abelkhan 的 `proto/`，两处刻意不同：类型在 payload 而非包头、帧头与传输解耦。\n- **`spikes/`（5 组可复现实验）**：`ts-vs-python`（地板/天花板）、`ts-runtime`（TS 优化收益排序 + 工具链断言）、`rpc-typing`（RPC 类型的可执行断言）、`aoi-tick`（S1 场景 tick + 折算核数 + **soak 长跑稳态**）、`ser-compare`（S2 序列化对比 + 压缩 + struct 冻结实验 + protobuf-es 行为契约 + RPC 信封校验）。\n- **工程坑记录在案**：Windows 上 protoc/buf 无法调用 npm 的 `.cmd` 插件（改用 `gen-es.mjs` 手喂 `CodeGeneratorRequest`）、protobufjs 的 `uint64` 不认 bigint（静默写 0）、FlatBuffers 的 struct 加字段是**静默数据损坏**（50/50 全错）、Go 单调时钟对微秒区间常报 0（改批量计时 + 如实标 `<LOD`）。\n- **未做/已知缺口**：`schema/protocol/frame.ts` 与 `frame.go` 及 13 条帧头验收测试尚未实现（P0 剩余部分）；业务域 proto 按需求暂不生成；`soak` 一小时结果尚未出；`mmorpg-verification-plan.md` 的四个实验在新栈下的取舍未同步更新。\n\n## Testing\n\n- `cd schema && ./check.sh` → protoc 编译 6 个 proto + protoc-gen-go（7 个文件）+ protoc-gen-es（6 个文件）+ methods.yaml 常量 + **12 条结构断言全过**（含\"gate 透传后内层字节逐字节相同\"与\"生成物无 `export enum`\"）\n- `node spikes/aoi-tick/bench.mjs` ×3 → 400:0.17 / 10000:5.21 / 30000:15.77 ms（Node），Bun 上 0.14 / 3.95 / 11.36\n- `node spikes/aoi-tick/scale.mjs` → 2w DAU 折算 0.66 核（含 3× 未建模倍数）\n- `node spikes/ser-compare/bench-ts.mjs 1000 300` ×3 与 `GOGC=800 ./bench-go.exe 1000 30` ×3 → 四组字节数两侧完全一致（50433/64096/34006/64232），单实体 hex 逐字节相同\n- `node spikes/ser-compare/compress-bench.mjs` → zstd-19 下 pb SoA 19.60 KB / FB 24.41 KB；N=60 每实体 25.4 / 26.7 B（差 5%）；brotli-11 压缩 30 KB 需 43.6 ms（不可用）\n- `node spikes/ser-compare/es-pitfalls.mjs` → protobuf-es 的 15 条行为契约全过\n- `node spikes/ser-compare/envelope-check.mjs` → 7 条信封断言全过（`status=0` 零占字节、未知 msg_type 数字原样保留）\n- `npx -p typescript@5.9 tsc -p spikes/ser-compare/es-check` → exit 0；`-p es-check-env` → TS1294（enum 反证）\n- Bun 1.4.5 实跑三个 bench + `soak.mjs`（60 分钟长跑进行中，已采样段 RSS 37.5–38.7 MB 平稳）"
 }

@@ -2,7 +2,7 @@
 
 > 上级文档：[`server-engine-stack.md`](server-engine-stack.md)（§8.2 未压缩实测、§8.3 库选型）
 > 配套证据：[`../spikes/ser-compare/`](../spikes/ser-compare/) —— `bench-ts.mjs`（读写）、`compress-bench.mjs`（压缩）、`fb-evolution.mjs`（FlatBuffers 的 struct 冻结）
-> 状态：**规划文档（v2，已由 FlatBuffers-first 改为 protobuf-first）**。§4 的帧头与 msgId 是唯一不可逆的部分。
+> 状态：**规划文档（v3）**。§4 的 4 字节帧头是唯一不可逆的部分——语义全部在 RPC 信封里，所以它能小到这个程度。
 
 ## 0. 结论先给
 
@@ -11,7 +11,7 @@
 - **R1 · 默认全部走 protobuf。** 按数据形状选布局：**每 tick 的批量数值用 SoA（packed 数组）**，一次性的对象用 AoS（普通 message）。
 - **R2 · 每帧广播的路径以"布局"换速度，不以"换格式"换速度。** 我们自己的实测：同一份 protobuf，AoS → SoA 让**读提速 3.3×、字节降 33%**，比换到 FlatBuffers 便宜得多。
 - **R3 · 只是转发**（gate → logic、logic → client）→ **原样透传字节，不解码、不转码**。
-- **R4 · 帧头保留 1 字节 `fmt`，值 1 固定为 protobuf。** 这是唯一的后路，成本 1 字节。
+- **R4 · 帧头只做纯传输分帧：4 字节（压缩位 + 长度）。** 路由靠 gate 的会话表、类型靠 RPC 信封的 `method`、配对靠 `req_id`——全在 payload 里。
 
 **为什么不给 FlatBuffers 留位置（这是我们自己的实测推翻了初稿）：**
 
@@ -52,7 +52,7 @@
 
 ```mermaid
 flowchart LR
-  C["Cocos 客户端（TS）"] <-->|"L1 · 长连接<br/>protobuf（SoA 热 / AoS 冷）<br/>12 B 帧头"| G["gate（Go）<br/>只读帧头，透传 payload"]
+  C["Cocos 客户端（TS）"] <-->|"L1 · 长连接<br/>protobuf（SoA 热 / AoS 冷）<br/>4 B 帧头"| G["gate（Go）<br/>只读 4 字节，透传 payload"]
   G <-->|"L3 · 内部<br/>pb 控制面 + 透传数据面"| K["core（TS）<br/>逻辑/战斗/AOI"]
   K <-->|"L4 · pb + zstd"| D["dbproxy（Go）"]
   K <-->|"L5 · pb"| K2["其他 scene / hub"]
@@ -62,7 +62,7 @@ flowchart LR
 
 | 链路 | 格式 | 理由 |
 |---|---|---|
-| **L1** client ⇄ gate ⇄ logic | **protobuf**（热路径 SoA、冷路径 AoS） | 一种格式 = 一套 schema、一套 codegen、一套调试工具 |
+| **L1** client ⇄ gate ⇄ logic | **protobuf**（热路径 SoA、冷路径 AoS），帧头 4 字节 | 一种格式 = 一套 schema、一套 codegen、一套调试工具；路由靠 gate 的会话表，不靠帧头 |
 | **L2** logic → gate → client 推送 | 同一通道，**字节透传** | gate 不解码，转发成本 = memcpy |
 | **L3** gate ⇄ logic | 控制面 pb；数据面**透传** | gate 若解码状态包，零分配设计就废了 |
 | **L4** logic ⇄ dbproxy ⇄ DB | **pb**，大对象再 zstd | 低频、要可读、要能与运维工具共用 |
@@ -123,45 +123,146 @@ flowchart LR
 
 ---
 
-## 4. 帧头与 msgId：唯一不可逆的部分
+## 4. 帧头设计：只剩"长度 + 压缩标志"
 
-**12 字节定长帧头，4 字节对齐：**
+### 4.0 架构决定了帧头能有多小
+
+三条事实把帧头的职责削到只剩"纯传输分帧"：
+
+1. **gate 保存 entity 的路由信息**（连接 → 会话/entity），所以帧头**不需要目标标识**——路由不是帧头的活。
+2. **走 RPC**：`callEntity<rsp>("method_name", req)`，**方法名在 payload 里**，所以帧头**不需要消息类型**。
+3. **不需要每帧序号**：请求-响应配对是 RPC 层的事（`req_id` 在信封里），不是传输层的事。
+
+于是帧头只回答一个问题：**这一坨字节在哪里结束、要不要先解压。**
+
+这比上一版（把 msgId / 域 / 优先级 / 扩展塞进帧头）更稳，理由值得记下来：**帧头是最不可改的地方，把业务演进塞进最不可改的地方，等于把演进的自由度绑死。** 语义全部进 payload，帧头就永远不用改。
+
+### 4.1 需求重新筛一遍
+
+| 需求 | 进头？ | 处理方式 |
+|---|---|---|
+| 帧边界（流式传输时切分） | ✅ | `len` |
+| 是否压缩 | ✅ | `flags` 的 1 bit |
+| 消息类型 / 方法名 | ❌ | RPC 信封的 `method` 字段（payload 内） |
+| 路由目标（entity） | ❌ | gate 的会话表（连接 → entity） |
+| 请求-响应配对 | ❌ | RPC 信封的 `req_id` |
+| 优先级 | ❌（可选 1 bit） | 若真需要，用 `flags` 的空位；但别指望 gate 解析 payload |
+| 版本 | ❌ | 握手时协商一次，不进每帧 |
+| 扩展块 / nonce / acks | ❌ | 要加就加信封字段；传输层要 ack 就包在帧头外面 |
+| 校验和 | ❌ | TLS + 传输层已校验 |
+| 分片 | ❌ | 应用层切块（`len` 上限内） |
+
+### 4.2 定稿：**4 字节**
 
 ```
 off  size  field
-0    1     fmt     1 = protobuf（当前只有这个值）, 0 = raw（心跳）, 2 = 保留
-1    1     flags   bit0: zstd  bit1: 分片  bit2–7 保留
-2    2     class   0 = 普通，1 = 战斗帧（给 gate 做优先级队列）
-4    4     len     payload 字节数（LE）
-8    4     msgId   见下表（LE）
-12   ...   payload
+0    1     flags   bit0 = 1 表示整帧 zstd；bit1-7 **必须为 0**
+1    3     len     payload 字节数（u24 LE，硬上限 1 MB）
+4    ...   payload
 ```
 
-**三条规矩：**
+- **payload 从第 4 字节开始 ⇒ 4 字节对齐**，零拷贝读 payload 时能按 u32/u64 直读。
+- **u24 而不是 u16**：省掉"64 KB 就得切块"的隐含约束；也不到 u32 的 4 GB（那是内存放大攻击的入口）。
+- **比特序固定**：bit0 压缩、其余必须 0，未知位 → 断开（理由见 4.4）。
 
-1. **`fmt` 由发送方写死，接收方不猜。** 同一个 `msgId` 永远只对应一种格式；换格式 = 换 `msgId`。
-2. **gate 只读前 12 字节**，不解 payload、不看 schema，路由靠会话表（连接 → uid → logic 节点）。
-3. **`msgId` 按域分段**，段内顺序数字，不复用已废弃的号：
+### 4.3 还能更小：**可以，但你需要放弃两件事**
 
-| 段 | 域 | 布局 |
+| 方案 | 大小 | 代价 |
 |---|---|---|
-| `0x00xx` | 心跳 / 底层控制 | raw |
-| `0x01xx` | 登录 / 鉴权 / 连接 | AoS |
-| `0x02xx` | 场景 / AOI / 移动 | **SoA** |
-| `0x03xx` | 战斗 | **SoA** |
-| `0x04xx` | 背包 / 道具 | AoS |
-| `0x05xx` | 任务 | AoS |
-| `0x06xx` | 邮件 / 商店 / 支付 | AoS |
-| `0x07xx` | 社交 / 公会 / 聊天 | AoS |
-| `0x08xx` | 排行 / 成就 / 活动 | AoS |
-| `0x09xx` | 错误 / 提示 / 重连 | AoS |
-| `0x0Axx` | 内部 gate ⇄ logic | AoS |
-| `0x0Bxx` | 内部 logic ⇄ dbproxy | AoS |
-| `0xF0xx` | GM / 运维 | AoS |
+| **定稿：`flags u8 + len u24`** | 4 B | —— |
+| `len u16 + flags u8` | 3 B | 不对齐 + 64 KB 上限 |
+| **只有 1 字节压缩标志**（靠 WebSocket 消息边界分帧） | 1 B | ① 每条游戏消息占一个 WS 消息 —— 小游戏每次回调有固定成本，20Hz 下"把 20 条合成 1 个 WS 消息"是真实优化；② 将来换 raw TCP / QUIC 要重做 |
+| 0 字节（全压缩 + 全靠 WS 边界） | 0 B | 同上 + 小帧也要压 |
 
-**为什么先定帧头**：它改了就要三端同时发版、老客户端掉线。schema 可以加字段，帧头不能。
+**建议留 4 字节**：`MoveBatch`（zstd 后 1.5 KB）上是 **0.26%** 的开销，换来"能批量"和"换传输不用改协议"。如果确定永远只用 WebSocket 且永不批量，砍到 1 字节也没问题——但那是把未来锁死，省下的是 3 字节/帧。
 
----
+### 4.4 四条解析规矩
+
+1. **`flags` 有未知位（bit1-7 非 0）→ 立即断开**，不"尽力解析"。语义变了还继续解析就是静默数据损坏——我们实测过的 FlatBuffers struct 就是这个失败模式，不能让它出现在帧头层。
+2. **`len == 0` 约定为 ping**：0 字节的心跳，不需要单独的心跳消息，也不需要类型字段。
+3. **`len > 1 MB` → 断开**（内存放大防护）；同时服务端自己的发送端硬性拒绝 > 1 MB 的单帧，逼超大数据走应用层切块。
+4. **半包 → 等待**（TCP 正常现象），不是错误；单帧凑满等待超 5 s → 断开。
+
+### 4.5 语义都在这里：RPC 信封
+
+`Envelope` 是**每条帧 payload 的唯一形状**。下面是经实测校过的版本（`spikes/ser-compare/schema/envelope.proto` + `envelope-check.mjs`）：
+
+```proto
+message Envelope {
+  uint32 msg_type    = 1;   // 1=Request 2=Response 3=Notify（0 保留给"未设置"，收到即丢）
+  uint32 method      = 2;   // method code（整数，不是字符串）
+  uint32 callback_id = 3;   // Request 填（>0）；Response 原样回填；Notify 填 0
+  uint32 status      = 5;   // 仅 Response：0=ok，非 0=错误码
+  bytes  body        = 4;   // 具体消息的 protobuf 编码
+  reserved 6 to 15;
+}
+```
+
+**【实测-本机】每种消息的线上开销（body = 100 字节时）：**
+
+| 消息 | 总字节 | 信封开销 | 说明 |
+|---|---:|---:|---|
+| `Request` | 109 | **9 B** | msg_type 2 + method 3 + callback_id 2 + body 头 2 |
+| `Response`（ok） | 109 | 9 B | **`status=0` 完全不占字节**（与显式写 0 的字节流完全相同） |
+| `Response`（status=403） | 112 | 12 B | 错误只贵 **3 B** |
+| `Notify` | 107 | 7 B | `callback_id=0` 被省略（省 2 B） |
+| `msg_type=0`（None） | 105 | 5 B | `msg_type=0` 也被省略（再省 2 B） |
+
+**四条由此确定的规矩：**
+
+1. **`msg_type` 建议用 `uint32`（这里是唯一适合用 uint32 的地方）。** 它的取值语义由协议文档定、不由业务 schema 表达，所以不丢东西；而业务里的枚举（品质、职业、错误码）应该正常用 `enum`，配套决策见 §4.5.1。
+2. **`callback_id` 的三方语义要写死**：Request 填、Response 回填、Notify 填 0。**只在 Response 上带 id 是错的**——那样 Response 无从知道自己在回应哪次调用。
+3. **`status` 必须留。** proto3 的隐式存在性意味着 `status=0` **一个字节都不占**（实测字节流完全相同），所以"删掉 status 省空间"是零收益；代价是框架级错误（超时/无权限/找不到目标/过载）只能塞进每个方法的 body 里，各写一套。
+4. **未知值一律丢弃 + 计数**：未知 `msg_type`（实测数字会原样保留，不会被当错误）与未知 `method` 都必须走 default 分支丢弃，**不断开**——那是前向兼容通道。
+
+#### 4.5.1 proto `enum` 与 `erasableSyntaxOnly`：这是工具链冲突，不是枚举的问题
+
+**先把话说清：枚举本身更好。** 它在 `.proto` 里自带文档、给 Go 侧生成常量、跨语言一致、TS 侧还能做穷尽 `switch`。问题只有一条链：
+
+```
+.proto 里写 enum
+  → protoc-gen-es 生成真正的 TS `enum`（不是 const 对象）
+  → `erasableSyntaxOnly` 下这是硬错误
+```
+
+【实测-本机】
+
+```
+gen/esenv/envelope_pb.ts(55,13): error TS1294: This syntax is not allowed when 'erasableSyntaxOnly' is enabled.
+```
+
+而且 **`protoc-gen-es` 没有"把 enum 生成成 const 对象"的选项**（翻过插件源码的 `parseOptions`：只有 `target` / `json_types` / `valid_types` / `keep_empty_files` / `import_extension` 等，没有枚举形态开关）。所以只有三条路：
+
+| 方案 | `.proto` 里保住枚举语义？ | 代价 |
+|---|---|---|
+| **A · schema 里写 `uint32`** | ❌ **丢掉**——文档、buf lint、Go 常量、其他语言消费者全都看不到允许值 | 每个枚举手写常量 + decode 边界一次 `as`；Go 侧也要手写 |
+| **B · 生成物入库**（protoc-gen-es 出 `.ts`，CI 编译成 `.js` + `.d.ts` 一并提交，`core` import `.js`） | ✅ | 生成物进 git（diff 噪音）；CI 需加"regenerate 后 diff 为空" |
+| **C · 关掉 `erasableSyntaxOnly`** | ✅ | 失去"`node core/src/x.ts` 零构建直接跑"；单测走 vitest/esbuild、客户端走 Cocos 构建，**枚举在这些链路里本来就没问题** |
+
+**线上字节完全不受影响**：同一份 Envelope，enum 版与 `uint32` 版编码结果**逐字节相同**（109 B，`0801108404182a2264ab…`）。所以这是纯"代码形态"的取舍，与协议无关。
+
+**如果逻辑层跑在 Bun 上，这个问题就消失了。** `erasableSyntaxOnly` 存在的唯一理由，是 Node 的 `--experimental-strip-types` **只能擦除、不能转换**；而 Bun 原生执行完整 TS（`enum` / 装饰器 / 参数属性 / `namespace` 都行）。所以 **Bun 让"选 C"变成零成本**——你既拿到"`bun core/src/x.ts` 直接跑"，又不用放弃枚举。（注意别混淆：`erasableSyntaxOnly` 是 **tsc 的编译期开关**，跑在 Bun 上也照样会报 TS1294；要选 C 就得把它删掉。）
+
+**建议（已从上一条的"推荐 A"改口）**：
+
+- **默认选 C**。"零编译步骤"是个便利属性，而 `.proto` 里的枚举语义是**跨团队、跨语言、跨工具**都要用到的东西；用 `uint32` 换来的只是本机能少一步构建，代价是 schema 从此不再自描述。你们的单测本来就会走 vitest/esbuild，枚举在这条路上无害。
+- **只有在"`core` 必须能 `node x.ts` 直接跑"是一条硬需求时**才选 B：CI 里编译一次、把 `.js` + `.d.ts` 一起提交，`core` import 的是已编译产物——枚举留在生成物的 `.d.ts` 里，源码侧看不到 `enum` 关键字。
+- **A 只在一种情况下用**：这条消息本来就不该有枚举（比如 `Envelope.msg_type` 这种"框架内部标签"，它的取值语义由协议文档定，不由业务 schema 表达）。
+
+### 4.6 这个设计带来的三个必答题
+
+1. **`req_id` 必须有。** `callEntity<rsp>` 返回 Promise ⇒ 同一连接上必然有多个请求在途（打开一个面板就要发 3 个查询）。靠"严格 FIFO 响应"在超时与乱序面前排障会非常痛苦。→ 放信封字段 1。
+2. **`method` 必须是整数。** 20 Hz × 4000 连接 = 8 万包/秒起步，每包做一次字符串比较不可接受；而且每包带 10–20 字节的方法名，等于把刚省下的帧头又加回来了。
+3. **gate 不要依赖"读固定偏移判断消息类型"。** protobuf 规范只保证**可解析**，不保证字段顺序（虽然 protobuf-go 与 protobuf-es 都按字段号升序写，我们实测两侧字节一致）。真要给战斗帧做优先级，就在 `flags` 里留 1 bit（现成有位），或者干脆让 gate 不关心类型。
+
+### 4.7 不可逆 vs 可以后加
+
+| 一旦定下不能改 | 随时能加 |
+|---|---|
+| 4 字节头的存在，`len` = **仅 payload 长度** 的语义 | `Envelope` 的字段（protobuf 加字段安全） |
+| `bit0 = zstd` 的含义 | 新的 method code（追加即可） |
+| `bit1-7` 必须为 0、未知位断开的规矩 | 批写/刷新策略（≥16 KB 或 4 ms 刷一次） |
+| `len == 0` = ping | 传输层包头（UDP 的 seq/ack 包在帧头外面） |
 
 ## 5. 压缩：实测之后，"省流量"不再是选格式的理由
 
@@ -227,7 +328,7 @@ FlatBuffers 的 `struct`（定长内联）**一旦上线就冻结**——这一�
 | table 数组 vs struct 数组：读 1000 实体 | **36–42 vs 18 ns/实体（2.0–2.3×）** |
 | table 数组 vs struct 数组：字节 | **74,336 vs 64,096 B（1.16×）** |
 
-所以**如果**引入 FB：每帧消息的 struct 必须一次预留 4 个 `int` 槽位、上线后只允许占坑、需要新语义就开新 `msgId` 双发过渡、并在 CI 里对 `*.fbs` 的 struct 段做 hash 快照。
+所以**如果**引入 FB：每帧消息的 struct 必须一次预留 4 个 `int` 槽位、上线后只允许占坑、需要新语义就开新消息双发过渡、并在 CI 里对 `*.fbs` 的 struct 段做 hash 快照。
 
 ---
 
@@ -235,15 +336,24 @@ FlatBuffers 的 `struct`（定长内联）**一旦上线就冻结**——这一�
 
 ### 7.1 目录
 
+框架面**已经落地**（见 [`../schema/README.md`](../schema/README.md)），业务消息暂不生成：
+
 ```
 schema/
-  pb/         *.proto        ← 全部消息（热路径 SoA 也在里面）
-  ids.yaml    msgId 注册表（唯一源） → 生成 TS / Go 常量
+  pb/
+    common.proto        标识 / 错误码 / 通用包装
+    envelope.proto      Envelope（客户端可见）+ InternalEnvelope / InternalPayload（内部链路）
+    client_gate.proto   客户端 ⇄ gate
+    gate_logic.proto    gate ⇄ logic
+    logic_dbproxy.proto logic ⇄ dbproxy（存储原语）
+    logic_logic.proto   logic ⇄ logic
+  methods.yaml          method code 注册表（唯一源）→ 生成 TS / Go 常量
+  check.sh              codegen + 12 条结构断言
 protocol/
-  frame.ts    12 字节帧头编解码（客户端一份、gate 一份，字节必须一致）
+  frame.ts              4 字节帧头编解码（**待写**；客户端一份、gate 一份，字节必须一致）
 ```
 
-**一份 `ids.yaml` 生成三处常量**：客户端 TS、gate Go、logic TS。名字对齐靠 codegen，不靠人。
+**一份 `methods.yaml` 生成三处常量**：客户端 TS、gate Go、logic TS。`"player.move" ↔ 0x0204` 这种映射只在一处定义，名字对齐靠 codegen，不靠人。废弃 code 进 `retired:` 列表，CI 拦住复用。
 
 ### 7.2 三条 CI 规矩
 
@@ -255,7 +365,7 @@ protocol/
 
 - [ ] 高频消息（≥5 Hz/连接）是 **SoA**；一次性对象是 AoS
 - [ ] 热路径消息里没有字符串/数组（有就拆包）
-- [ ] 新 `msgId` 从注册表申请，没有复用已废弃号
+- [ ] 新 method code 从 `methods.yaml` 申请，没有复用已废弃号
 - [ ] 转发路径（gate）没有解 payload
 - [ ] 涉及金额/订单的消息入了审计日志
 - [ ] 量化参数与上一版一致（或 PR 显式标注变更）
@@ -266,11 +376,29 @@ protocol/
 
 | 阶段 | 内容 | 完成判据 |
 |---|---|---|
-| **P0** | 定帧头（§4）+ `ids.yaml` + 两份帧头实现（TS/Go）+ 一致性测试 | 同一帧在 TS 与 Go 解析出的字段完全相同；截断/超长/未知 `fmt` 都有明确错误 |
+| **P0** | 定帧头（§4）+ `Envelope` + `methods.yaml` + 两份帧头实现（TS/Go）+ 下面这张测试表全绿 | 见 §8.1 |
 | **P1** | 第一条热路径消息用 **SoA** 实现（`MoveBatch`）；其余全 AoS | 端到端跑通；客户端每帧解码 < 1 ms |
 | **P2** | `SceneSnapshot` + `EntityDeltaBatch` 迁 SoA；引入 zstd-19（快照）/ zstd-3（>512 B 增量） | 带宽与 P1 对比有量化下降；解压不超 0.5% 帧预算 |
 | **P3** | gate 变"只读帧头"的透传器 | gate 单进程连接密度达标（对应 §8 的 S4） |
 | **P4** | 回放落 pb 帧 + 帧头；跨服/迁移走 pb | 回放能逐帧重发；迁移不改变客户端可见行为 |
+
+### 8.1 P0 的验收测试（帧头只有一次机会，所以先写测试）
+
+| # | 用例 | 期望 |
+|---|---|---|
+| 1 | 同一帧在 TS 与 Go 各解析一遍 | `flags` / `len` / payload 边界完全相等 |
+| 2 | `flags` 有未知位（例：bit3=1） | **立即断开**，不"尽力解析" |
+| 3 | `len == 0` | 当作 ping，不读 payload |
+| 4 | `len > 1 MB` | 断开；发送端构造时直接抛 |
+| 5 | 半包（只喂前 2 字节） | 等待不报错；继续喂够 4+len 后成功 |
+| 6 | 半包超时 5 s | 断开 |
+| 7 | `flags` bit0=1 但 payload 不是合法 zstd | 断开（数据损坏，不静默当明文） |
+| 8 | `Envelope` 的 `method` 不在 `methods.yaml` | **丢弃 + 计数，不断开**（前向兼容：新推送老客户端要无感忽略） |
+| 9 | `Envelope` 的 `req_id` 重复 | 计数 + 告警（客户端 bug，不是攻击） |
+| 10 | `Envelope` 缺 `req_id`（=0）却是响应 | 丢弃 + 告警 |
+| 11 | 一个 WebSocket 消息里塞 3 帧（批量） | 三帧按序解析，字节边界不串 |
+| 12 | 随机字节模糊测试（10 万次） | 零崩溃、零越界、错误分类正确 |
+| 13 | 帧头 4 字节 + payload 的偏移对齐 | payload 起始地址 4 字节对齐（用 `Buffer.byteOffset` / Go 切片底层数组验证） |
 
 **顺序理由**：P0 不可逆，必须先做对；P1 用一条消息验证"SoA 够用"这个判断（如果不成立，§9 的触发条件会被提前触发）；P2 才谈压缩；P3 依赖 P0 的 `fmt` 才能不解析就转发。
 
@@ -300,5 +428,5 @@ protocol/
 | ② | zstd 解压在**低端安卓**上的实际耗时 | **【未核实】**：本文是 i5-14400F 的数。移动端按 3–5× 估，需要实测 |
 | ③ | 小游戏 runtime 是否允许 wasm 解码器（zstd 的 JS 实现会慢一个数量级） | **【未核实】**：决定"压缩"在小游戏渠道上是否可用 |
 | ④ | `dirtyMask` 的粒度（按字段还是按实体） | **待拍板**：按字段省字节，但实现复杂；建议先按实体 |
-| ⑤ | 是否兼容 abelkhan 的 `proto/` | **【未核实】**：若复用它的服务端，msgId 段要重新对 |
+| ⑤ | 是否兼容 abelkhan 的 `proto/` | **【未核实】**：若复用它的服务端，method code 表要重新对 |
 | ⑥ | 帧头 `class` 字段（战斗帧优先级）是否真需要 | **未验证**：等 S4 压测才知道 |

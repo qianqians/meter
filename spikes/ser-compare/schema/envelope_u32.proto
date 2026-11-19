@@ -1,0 +1,13 @@
+syntax = "proto3";
+package env2;
+option go_package = "s2bench/envelope2;envelope2";
+
+// 与 envelope.proto 完全同构，只把 enum 换成 uint32 —— 用来验证线上字节是否相同
+message Envelope {
+  uint32 msg_type    = 1;
+  uint32 method      = 2;
+  uint32 callback_id = 3;
+  uint32 status      = 5;
+  bytes  body        = 4;
+  reserved 6 to 15;
+}

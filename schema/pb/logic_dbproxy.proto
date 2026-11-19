@@ -1,0 +1,125 @@
+syntax = "proto3";
+
+// logic ⇄ dbproxy 的**存储原语**协议。
+//
+// 对照 abelkhan：它由 hub 直连 MongoDB，**没有** dbproxy 这一层协议；
+// 这一层是本架构新增的（参考 server-engine-stack.md 的分层与独立文档 §2）。
+//
+// 口径纪律：这里只定义"怎么存"，**不定义"存什么"**。
+//   · key 是不透明字节，由逻辑层的业务代码决定（建议 `entity:<id>`、`mail:<uid>` 这类前缀）。
+//   · value 是不透明字节，通常是逻辑层自己的 protobuf 存档，dbproxy 不解析。
+//   · 任何业务字段都不许出现在本文件里，否则 dbproxy 就会长出业务知识。
+//
+// 一致性模型（必须写清，否则调用方会误用）：
+//   · 单 key 的 Get/Set 是原子的；
+//   · 多 key 批量操作**不是事务**，失败时可能部分生效（返回逐项结果）；
+//   · 需要乐观并发控制时用 `expect_version`（见 SetItem），冲突返回 STORAGE_CONFLICT；
+//   · 没有跨 key 事务。需要"要么全成要么全不成"时，由逻辑层用补偿或事件日志实现。
+
+package fw;
+
+import "common.proto";
+
+option go_package = "meter/schema/pb;pb";
+
+// 存储键。namespace 用于分桶（例如 "entity" / "mail" / "guild"），key 由业务决定。
+message StorageKey {
+  string namespace = 1;
+  bytes key = 2;
+}
+
+// 版本号约定：
+//   0  = 不关心版本（盲写）
+//   >0 = 期望的当前版本（CAS）；不匹配则该项失败，返回 STORAGE_CONFLICT
+// 返回值里 version 由 dbproxy 维护，单调递增（实现可以是 DB 的自增或时间戳）。
+message SetItem {
+  StorageKey key = 1;
+  bytes value = 2;
+  uint64 expect_version = 3;
+  uint32 ttl_ms = 4;        // 0 = 不过期
+}
+
+message ItemResult {
+  ErrorCode error = 1;
+  uint64 version = 2;       // 成功时为写入后的新版本
+}
+
+message StorageItem {
+  StorageKey key = 1;
+  bytes value = 2;
+  uint64 version = 3;
+  bool found = 4;
+}
+
+// ---------------------------------------------------------------------------
+// 原语（method 落在 0x0Bxx 段）
+// ---------------------------------------------------------------------------
+
+// 单读（method = 0x0B01）
+message GetRequest {
+  StorageKey key = 1;
+}
+message GetResponse {
+  ErrorCode error = 1;
+  StorageItem item = 2;
+}
+
+// 批量读（method = 0x0B02）。调用方应自行限制 keys 数量（建议 ≤ 256）。
+message BatchGetRequest {
+  repeated StorageKey keys = 1;
+}
+message BatchGetResponse {
+  ErrorCode error = 1;
+  repeated StorageItem items = 2;   // 与请求 keys **一一对应**（未命中处 found=false）
+}
+
+// 单写（method = 0x0B03）
+message SetRequest {
+  SetItem item = 1;
+}
+message SetResponse {
+  ErrorCode error = 1;
+  ItemResult result = 2;
+}
+
+// 批量写（method = 0x0B04）。非事务：逐项独立成败，逐项返回。
+message BatchSetRequest {
+  repeated SetItem items = 1;
+}
+message BatchSetResponse {
+  ErrorCode error = 1;
+  repeated ItemResult results = 2;  // 与请求 items 一一对应
+}
+
+// 删除（method = 0x0B05）。幂等：删不存在的 key 视为成功。
+message DeleteRequest {
+  StorageKey key = 1;
+  uint64 expect_version = 2;        // 0 = 无条件删
+}
+message DeleteResponse {
+  ErrorCode error = 1;
+  ItemResult result = 2;
+}
+
+// 存在性/版本探测（method = 0x0B06）。比 Get 便宜，用于写入前的前置检查。
+message ExistsRequest {
+  StorageKey key = 1;
+}
+message ExistsResponse {
+  ErrorCode error = 1;
+  bool found = 2;
+  uint64 version = 3;
+}
+
+// ---------------------------------------------------------------------------
+// 运维（method = 0x0B0F）
+// ---------------------------------------------------------------------------
+
+// 存储层健康与容量上报。dbproxy 定期推给逻辑层/监控，用于"存储抖动"告警。
+message StorageHealth {
+  string backend = 1;        // "mysql" / "mongodb" / "redis"…
+  bool healthy = 2;
+  uint32 p99_ms = 3;         // 最近窗口的 p99 延迟
+  uint64 inflight = 4;       // 在途请求数
+  uint64 qps = 5;
+}

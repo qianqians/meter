@@ -1,0 +1,117 @@
+syntax = "proto3";
+
+// logic ⇄ logic 的**内部**协议：节点发现、实体迁移、跨实体调用。
+//
+// 对照 abelkhan：它的 hub_hub.proto 是这一层（hub 之间）。
+//
+// 三条边界（不遵守就会长出第二套真相）：
+//   1. 跨节点调用只**转发**，不在中转节点上执行业务逻辑。
+//   2. 实体迁移必须由**原节点**发起并完成落库，之后新节点才是权威（"内核是唯一写者"）。
+//   3. 这里不出现任何业务语义；业务消息一律以不透明字节透传。
+
+package fw;
+
+import "common.proto";
+
+option go_package = "meter/schema/pb;pb";
+
+// 节点自述：启动时向注册中心/对等节点广播一次。
+message NodeDesc {
+  string node_id = 1;
+  string addr = 2;                 // host:port（内部链路，不走公网）
+  repeated string roles = 3;       // "logic" / "scene" / "social" …
+  uint32 capacity_sessions = 4;    // 设计容量，用于负载均摊
+  string zone = 5;                 // 区/服标识
+}
+
+// 注册（method = 0x0C01）
+message RegisterRequest {
+  NodeDesc node = 1;
+  uint32 proto_ver = 2;
+}
+message RegisterResponse {
+  ErrorCode error = 1;
+  repeated NodeDesc peers = 2;     // 已知的对等节点（全量或增量由实现决定）
+}
+
+// 心跳（method = 0x0C02）。超过 N 个周期没心跳即视为下线。
+message NodeHeartbeat {
+  string node_id = 1;
+  uint32 sessions = 2;
+  uint32 tick_lag_ms = 3;
+  bool accepting = 4;
+}
+
+// 节点下线（MSG_NOTIFY，method = 0x0C03）
+message NodeGone {
+  string node_id = 1;
+  string reason = 2;
+}
+
+// ---------------------------------------------------------------------------
+// 实体迁移
+// ---------------------------------------------------------------------------
+//
+// 顺序（缺一不可）：
+//   ① 原节点停止对该实体的写权（标记 migrating）
+//   ② TransferPrepare → 新节点回 TransferReady，表示已就绪接收入口流量
+//   ③ 原节点用 TransferCommit 交付最终状态（含已落库的 version）
+//   ④ 新节点 TransferAck 之后成为唯一写者；原节点丢弃本地副本
+//   ⑤ gate 侧用 SessionRebind 更新路由
+
+message TransferPrepareRequest {
+  uint64 entity_id = 1;
+  string from_node = 2;
+  string to_node = 3;
+  uint32 proto_ver = 4;
+}
+message TransferPrepareResponse {
+  ErrorCode error = 1;
+  bool ready = 2;                  // false = 目标过载/正在迁移，原节点应稍后重试
+}
+
+message TransferCommitRequest {
+  uint64 entity_id = 1;
+  bytes  state = 2;                // 该实体的最终状态（不透明字节，由逻辑层自定）
+  uint64 version = 3;              // 与存储层对齐的版本号（见 logic_dbproxy.proto）
+  uint64 handoff_time_ms = 4;
+}
+message TransferCommitResponse {
+  ErrorCode error = 1;
+  bool accepted = 2;
+}
+
+// ---------------------------------------------------------------------------
+// 跨实体调用（框架级转发，不含业务）
+// ---------------------------------------------------------------------------
+//
+// 客户端只能操作"自己的"实体；服务端内部则经常需要"让 A 去处理 B"（组队、交易、战斗协战）。
+// 这类调用统一走这里，而不是让各业务自己写一套转发。
+
+message CrossCallRequest {
+  uint64 dst_entity = 1;
+  uint32 method = 2;               // 业务域的方法码（≥0x1000），由目标节点自身分发
+  bytes  body = 3;                 // 目标方法的请求体
+  string trace_id = 4;
+}
+message CrossCallResponse {
+  ErrorCode error = 1;
+  bytes body = 2;                  // 目标方法的响应体（成功时）
+}
+
+// ---------------------------------------------------------------------------
+// 频道（场景/世界）广播
+// ---------------------------------------------------------------------------
+//
+// 逻辑层内部常见的"向某个频道/场景的所有订阅者推一条"——放在框架面，
+// 避免每个业务都实现一遍扇出。真正的字节由调用方给（通常是客户端可直接消费的 Envelope）。
+
+message ChannelPublish {
+  string channel = 1;              // "scene:1001" / "world:notice" …
+  bytes  payload = 2;              // 对订阅者原样下发
+  bool   exclude_sender = 3;
+}
+message ChannelPublishAck {
+  ErrorCode error = 1;
+  uint32 receivers = 2;
+}

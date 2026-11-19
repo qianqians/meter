@@ -19,6 +19,20 @@
 | [`ser-compare/`](ser-compare/) | 同一份 schema 下 flatbuffer 与 protobuf 的字节数、encode、read 各差多少？该砍一个还是分工？（TS 与 Go 两侧都测） |
 | [`rpc-typing/`](rpc-typing/) | 不写泛型参数、让方法名字面量同时决定请求与响应类型的 RPC 类型，在 TS 5.9 `--strict` 下真的成立吗？错用会被编译期拦住吗？ |
 
+## 〇、aoi-tick/soak.mjs：长跑稳态
+
+回答的问题不是"多快"，而是"跑一小时后它还稳不稳"。每个 tick = 一次真实逻辑服 tick + 一次网络往返
+（场景 tick + protobuf 编码 + zstd 往返 + 解码），**故意保留分配源**——纯 SoA tick 零分配，测不出 GC 问题。
+
+```bash
+node soak.mjs --minutes=1  --hz=10                          # 冒烟
+bun  soak.mjs --minutes=60 --hz=20 --scenes=2 --entities=400 # 长跑
+```
+
+**判据先写死，再看结果**（脚本里就是这三个）：A RSS 收敛（末 20% vs 首 20% 中位数，增长 <10% 且 <32 MB）；
+B p99 不漂移（末 20% ≤ 首 20% × 1.5）；C 末段 10 分钟 RSS 斜率 < 0.5 MB/min；D 兜底：RSS > 1.5 GB 立即中止。
+采样写进 `.soak/*.jsonl`（已 gitignore）。
+
 ## 一、ts-vs-python：地板与天花板
 
 同一份算法（`x += vx; y += vy; s += x`），N = 100,000 实体 × 60 tick，单位 **ns / 实体·tick**（越小越好）。
@@ -184,6 +198,8 @@ npx --yes -p typescript@5.9 tsc -p .
 | Python | 3.14.6 |
 | numpy / Cython | 2.5.4 / 3.3.1 |
 | C 编译器 | MSVC 14.51（VS 18） |
+
+**运行时有影响（实测）**：`aoi-tick`、`bench-ts`、`compress-bench` 都在 Node 18（V8）与 Bun 1.4.5（JSC）上各跑过一遍。Bun 全面更快（骨架 tick −20~28%、protobuf-es SoA 读 176→98 ns/实体、JSON 快 4×、冷启动 53→25 ms、空载 RSS 40→18 MB），但 **zstd 在 N=1000 上反而慢 2×**。所以每个数字都要带"跑在什么上"，见 `docs/server-engine-stack.md` §8.4。
 
 **这些数字不能推出什么**：单线程、无网络 IO、无 AOI 空间查询、无序列化在环内、无 GC 压力叠加。
 它们是"同一个循环在两门语言里的原料成本"，不是"一台机器能扛多少玩家"。

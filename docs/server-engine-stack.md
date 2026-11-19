@@ -459,7 +459,7 @@ S2 里 protobuf 那几行用的是 **protobufjs**——那是"最快能跑起来
 
 | 判据 | **protobuf-es v2**（`@bufbuild/protobuf` 2.6.3） | **protobufjs 7** |
 |---|---|---|
-| **`erasableSyntaxOnly`**（`core` 硬要求） | 生成**真 TS 源**：type-only interface + `MessageSchema` 常量，无 `enum`/`class`/`namespace`。`tsc --erasableSyntaxOnly --verbatimModuleSyntax --strict` → **exit 0** | 运行时尚可，但产物是 **CommonJS**：ESM 里必须 `createRequire`（本轮实测）。它的 `pbts` 类型声明也能过 erasable 检查（ambient namespace 合法），所以这条判据不区分两者——真正的冲突是 CJS/ESM |
+| **`erasableSyntaxOnly`**（`core` 硬要求） | 生成**真 TS 源**：type-only interface + `MessageSchema` 常量，无 `class`/`namespace`。`tsc --erasableSyntaxOnly --verbatimModuleSyntax --strict` → **exit 0** ｜ ⚠️ **但这条只在 schema 里没有 `enum` 时成立**：`.proto` 一旦写 `enum`，protoc-gen-es 会生成真正的 TS `enum` → **`error TS1294`，编不过**（本轮实测，见 [`protocol-map.md`](protocol-map.md) §4.5.1） | 运行时尚可，但产物是 **CommonJS**：ESM 里必须 `createRequire`（本轮实测）。它的 `pbts` 类型声明也能过 erasable 检查（ambient namespace 合法），所以这条判据不区分两者——真正的冲突是 CJS/ESM |
 | **64 位语义** | 原生 `bigint` | 不收 `bigint`，**静默写成 0**（§8.2 的坑） |
 | **客户端包体**（minified / gzip） | 100.5 KB / **27.7 KB** | 70.6 KB / **16.0 KB**（FlatBuffers 仅 23.6 KB / **4.1 KB**） |
 
@@ -506,6 +506,35 @@ S2 里 protobuf 那几行用的是 **protobufjs**——那是"最快能跑起来
 **一个 Windows 上的工程坑（已解决）**：`protoc` 与 `buf` 都要求插件是**可执行文件**，而 npm 在 Windows 上只生成 `protoc-gen-es.cmd`，直接传给 `--plugin=` 会以 `'.' 不是内部或外部命令` 失败。解法是用 protoc 只产出 `FileDescriptorSet`，再手工构造 `CodeGeneratorRequest` 喂给插件 stdin（[`../spikes/ser-compare/gen-es.mjs`](../spikes/ser-compare/gen-es.mjs)）——这正是 protoc 内部做的事，只是手动走一遍。
 
 **这些数字没算什么**：网络带宽与 GOP/帧封装、压缩（两者都还没过 zstd/deflate，压缩后 varint 的优势会变小）、TS 端的真实客户端实现（这里用的是 protobufjs 静态码，`protobuf-es` 会更快）、以及 Go 侧的零拷贝读（`unsafe` / codegen 变体）。
+
+### 8.4 运行时：Node 18（V8）vs Bun 1.4.5（JSC）
+
+同一批脚本原样跑在两个运行时上（`spikes/aoi-tick/bench.mjs`、`bench-ts.mjs`、`compress-bench.mjs`，参数相同）：
+
+| 指标 | Node 18.20.8（V8） | **Bun 1.4.5（JSC）** | 变化 |
+|---|---:|---:|---:|
+| S1 tick · 400 实体 | 0.17 ms | **0.14 ms** | −18% |
+| S1 tick · 10,000 实体 | 5.21 ms | **3.95 ms** | −24% |
+| S1 tick · 30,000 实体 | 15.77 ms | **11.36 ms** | −28% |
+| protobuf-es **SoA** read（1000 实体） | 176 µs（176 ns/实体） | **98 µs（98 ns/实体）** | **−44%** |
+| protobuf-es AoS read | 846 µs | 393 µs | −54% |
+| FlatBuffers AoS read | 104 µs | 86 µs | −17% |
+| protobufjs SoA read | 484 µs | 379 µs | −22% |
+| JSON encode（1000 实体） | 902 µs | **215 µs** | −76% |
+| zstd-3 合计（N=60，pb SoA） | 52 µs | 53 µs | 持平 |
+| zstd-3 合计（N=1000，pb SoA） | 143 µs | 293 µs（压缩 85→216） | **变差** |
+| 冷启动（`-e 0`，min of 6） | 53 ms | **25 ms** | 2× |
+| 空载 RSS | 40 MB | **18 MB** | −55% |
+
+**三条会改变结论的观察：**
+
+1. **`protobuf-es` 的 SoA 读取在 Bun 上是 98 ns/实体，几乎追平 FlatBuffers 的 86 ns（只差 14%）。** 这是 §8.2/`protocol-map.md` 那场"要不要 FlatBuffers"争论的最后一块筹码——它在 Bun 上基本蒸发。
+2. **逻辑层骨架 tick 快 20–28%**，而 §8.1 的机器数折算（0.66 核）是以 Node 为分母的；换 Bun 后同一份负载更便宜。
+3. **zstd 在 N=1000 上反而慢了 2×**（压缩 85 → 216 µs）。Bun 自带 `Bun.zstdCompressSync` / `node:zlib` 的 zstd，不必依赖 native addon；但这条**必须重测**，不能用 Node 的结论套。
+
+**⚠️ 这些数字的适用范围**：客户端仍然是 Cocos（V8 / 各家小游戏 JS 引擎），所以**客户端侧的数字不受 Bun 影响**——Bun 的收益只落在服务端逻辑层。另外这是一台桌面机、跑几秒的稳态前数字，**长时间运行的内存/GC 稳态没测**（见 `protocol-map.md` §10）。
+
+> 方法论提醒：我们此前所有"实测-本机"都标注了 Node 18。运行时一换，这些数字就不再可比——所以本文的每个性能结论都必须带"运行在什么上"，这也是 §8.3 那条"三方字节一致"之类结论能跨运行时成立、而性能结论不能的原因。
 
 ---
 

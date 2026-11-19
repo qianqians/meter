@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package env;
+
+option go_package = "s2bench/envelope;envelope";
+
+// 候选的 RPC 信封：4 字节帧头之内的唯一形状。
+enum MsgType {
+  Msg_None = 0;
+  Msg_Request = 1;
+  Msg_Response = 2;
+  Msg_Notify = 3;
+}
+
+message Envelope {
+  MsgType msg_type = 1;
+  uint32 method = 2;
+  uint32 callback_id = 3;
+  // 候选新增：错误码（0 = ok）。见文档 §4.6 —— proto3 下 0 不占字节，等于白送
+  uint32 status = 5;
+  bytes body = 4;
+  reserved 6 to 15;
+}

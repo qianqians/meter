@@ -1,0 +1,132 @@
+syntax = "proto3";
+
+// gate ⇄ logic 的**内部**协议。
+//
+// 对照 abelkhan：它的 hub_gate.proto 是同一层（gate 与逻辑 hub 之间的会话与投递）。
+//
+// 关键约束（docs/protocol-map.md §2 / §4）：
+//   · gate **不解** Envelope。它只读 4 字节帧头，然后把整段 payload 原样投给逻辑层。
+//     所以下面的 DeliverUpstream.payload 是**客户端的 Envelope 字节**，不是解码后的结构。
+//   · gate 的会话表是唯一的路由来源：连接 → session_id → entity_id → node_id。
+//     因此客户端上行消息里不需要目标信息。
+//   · 这一层的消息用 InternalEnvelope 包（见 envelope.proto），method 落在 0x0Axx 段。
+
+package fw;
+
+import "common.proto";
+
+option go_package = "meter/schema/pb;pb";
+
+// ---------------------------------------------------------------------------
+// 会话生命周期
+// ---------------------------------------------------------------------------
+
+// 建立会话（gate → logic，MSG_REQUEST，method = 0x0A01）。
+// 逻辑层在鉴权成功后调用；gate 收到应答后才会开始投递该会话的上行消息。
+message SessionBindRequest {
+  uint64 session_id = 1;
+  uint64 uid = 2;
+  uint64 entity_id = 3;
+
+  // 该连接所在的 gate 标识（逻辑层回推时用它选链路）。
+  string gate_id = 4;
+
+  // 客户端握手时协商到的协议版本与平台，供逻辑层做灰度决策。
+  uint32 proto_ver = 5;
+  string platform = 6;
+
+  // 客户端地址（仅日志用，可能已过 NAT）。
+  string remote_addr = 7;
+}
+
+message SessionBindResponse {
+  ErrorCode error = 1;
+}
+
+// 会话断开（gate → logic，MSG_NOTIFY，method = 0x0A02）。
+// gate 在 TCP/WS 断开时立即发；逻辑层据此做"角色离线"处理（注意：不是立即落库）。
+message SessionUnbind {
+  uint64 session_id = 1;
+  uint64 uid = 2;
+  ErrorCode error = 3;   // 断开原因（正常关闭填 0）
+}
+
+// 会话已被逻辑层判定失效，请求 gate 关闭连接（logic → gate，MSG_NOTIFY，method = 0x0A03）。
+message KickSession {
+  uint64 session_id = 1;
+  ErrorCode error = 2;
+  string detail = 3;
+}
+
+// 更新会话的实体绑定（例如角色切换、实体迁移后，msg_type = 0x0A04）。
+// gate 只改自己的路由表，不触碰 payload。
+message SessionRebind {
+  uint64 session_id = 1;
+  uint64 entity_id = 2;
+  string node_id = 3;
+}
+
+// ---------------------------------------------------------------------------
+// 数据面：上下行投递
+// ---------------------------------------------------------------------------
+//
+// 方向说明：gate 永远只是搬运工。它把客户端的一段 Envelope 字节塞进 payload，
+// 逻辑层解 envelope、按 method 分发；反过来也一样。
+
+// 上行投递（gate → logic，MSG_NOTIFY，method = 0x0A10）。
+message DeliverUpstream {
+  uint64 session_id = 1;
+
+  // 客户端的原始 Envelope 字节（gate 未解析）。
+  bytes payload = 2;
+
+  // 该帧的到达时间（服务端毫秒），逻辑层可用它做事后统计；不要用于业务判定。
+  uint64 recv_time_ms = 3;
+}
+
+// 下行投递（logic → gate，MSG_NOTIFY，method = 0x0A11）。
+message DeliverDownstream {
+  uint64 session_id = 1;
+
+  // 要原样发给客户端的 Envelope 字节。
+  bytes payload = 2;
+
+  // 允许整帧压缩的标记（0 = 不压，1 = zstd）。gate 只按位处理，不看内容。
+  uint32 compress = 3;
+}
+
+// 广播下行（logic → gate，MSG_NOTIFY，method = 0x0A12）。
+// 同一段字节发给多个会话时用它，避免 N 次 RPC 调用。
+message DeliverDownstreamBatch {
+  repeated uint64 session_ids = 1;
+  bytes payload = 2;
+  uint32 compress = 3;
+}
+
+// ---------------------------------------------------------------------------
+// 健康与流量控制
+// ---------------------------------------------------------------------------
+
+// 逻辑节点负载上报（logic → gate，MSG_NOTIFY，method = 0x0A20）。
+// gate 用它决定新会话分配到哪个节点（最简：轮询 + 低于阈值才分配）。
+message NodeLoadReport {
+  string node_id = 1;
+  uint32 sessions = 2;        // 当前承载会话数
+  uint32 tick_lag_ms = 3;     // 最近一次 tick 的延迟
+  bool accepting = 4;         // false = 不再接新会话（正在迁移/过载）
+}
+
+// gate 要求逻辑层停机（运维动作，gate → logic，MSG_NOTIFY，method = 0x0A21）。
+// 逻辑层应在此之后只处理在途请求，不再接新会话。
+message GateDrain {
+  string gate_id = 1;
+  uint32 grace_ms = 2;
+  string reason = 3;
+}
+
+// gate 侧观测（可选）：单会话上行速率超限时的告警，给逻辑层做限流闭环。
+message SessionRateHint {
+  uint64 session_id = 1;
+  uint32 frames_per_sec = 2;
+  uint32 bytes_per_sec = 3;
+}

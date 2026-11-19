@@ -13,17 +13,21 @@
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { create, toBinary, fromBinary } from '@bufbuild/protobuf';
 import { CodeGeneratorRequestSchema, CodeGeneratorResponseSchema, FileDescriptorSetSchema } from '@bufbuild/protobuf/wkt';
 
-const OUT_DIR = 'gen/es';
-const DESC = 'gen/state.desc';
-const PLUGIN = 'node_modules/@bufbuild/protoc-gen-es/bin/protoc-gen-es';
+const OUT_DIR_DEFAULT = 'gen/es';
+const DESC = process.argv[2] ?? 'gen/state.desc';
+const FILE = process.argv[3] ?? 'state.proto';
+const OUT = process.argv[4] ?? OUT_DIR_DEFAULT;
+// 相对**本文件**解析，而不是相对 CWD —— 否则从别的目录调用会找不到插件
+const PLUGIN = fileURLToPath(new URL('./node_modules/@bufbuild/protoc-gen-es/bin/protoc-gen-es', import.meta.url));
 
 const fds = fromBinary(FileDescriptorSetSchema, readFileSync(DESC));
 const request = create(CodeGeneratorRequestSchema, {
-  fileToGenerate: ['state.proto'],
+  fileToGenerate: [FILE],
   parameter: 'target=ts',
   protoFile: fds.file,
 });
@@ -36,7 +40,7 @@ const response = fromBinary(
 if (response.error) throw new Error(`protoc-gen-es: ${response.error}`);
 
 for (const f of response.file) {
-  const path = join(OUT_DIR, f.name);
+  const path = join(OUT, f.name);
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, f.content);
   console.log(`written ${path} (${f.content.length} bytes)`);
