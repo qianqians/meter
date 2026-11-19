@@ -111,6 +111,10 @@ N = 1000 实体；两侧产出的**字节流完全一致**（50433 / 64096 / 340
 
 **TS 侧用哪个 protobuf 库**（同一条 bench 上加的变体）：protobuf-es v2 在 AoS 上**比 protobufjs 慢 1.5×**（1440 µs vs 750 µs，因为每个 message 的默认字段都要填满），但在 packed 数组上快 **2.7×**（176 µs vs 490 µs）；两者字节流都与 Go 逐字节一致。包体（min+gzip）：protobuf-es 100.5/27.7 KB、protobufjs 70.6/16.0 KB、flatbuffers 23.6/**4.1** KB。
 
+**压缩实验**（`compress-bench.mjs`）：zstd-19 下 pb SoA 19.60 KB / pb AoS 29.90 KB / FB AoS 24.41 KB（N=1000）；N=60 的每 tick 增量里 FB 只比 pb SoA 大 **5%**。**压缩把"FB 费流量"这条理由吃掉了，也让"布局"的权重超过"格式"**（pb SoA 比 pb AoS 小 34%）。brotli-11 压缩率最好但压缩一个 30 KB 包要 43,647 µs，不可用。
+
+**演进实验**（`fb-evolution.mjs`）：给 FB 的 struct 加一个字段，用新代码解老字节 **不报错、前 50 个实体 50/50 全错**——静默数据损坏。改用 table 能演进，代价是读 **2.0–2.3×**、字节 **1.16×**。这条直接决定了 `docs/protocol-map.md` §5 的"预留槽位 + 冻结纪律"。
+
 **两个坑**（已修，但是"双协议"的真实成本）：protobufjs 的 `uint64` 不认 `bigint`（会静默写 0）；protobufjs 会写出显式 0 而 protoc-gen-go 省略默认值（字节差 1.7%）。
 详见 [`ser-compare/README.md`](ser-compare/README.md)。
 
@@ -157,6 +161,9 @@ cd ser-compare
 ./build.sh                          # 生成 gen/ 与 bench-go.exe
 node bench-ts.mjs 1000 300
 GOGC=800 ./bench-go.exe 1000 30
+node compress-bench.mjs              # 压缩：体积 + 压缩/解压耗时
+node fb-evolution.mjs                # FlatBuffers struct 加字段的后果
+node es-pitfalls.mjs                 # protobuf-es 的 15 条行为契约
 
 # 五（工具链断言）
 cd ../ts-runtime

@@ -1,0 +1,71 @@
+// S1/S2 衍生实验：FlatBuffers 的 struct 能不能演进？table 版本的代价是多少？
+// 这份 schema 与 state.fbs 的字段完全相同，只是：
+//   ① EntityStateV2 = 在 struct 末尾**新增**一个字段（模拟"上线后发现要加字段"）
+//   ② EntityStateT  = 同样 15 个字段，但用 table 表达（可演进的那条路）
+//   ③ StatePacketT  = 用 table 数组装实体
+namespace s2v2;
+
+struct EntityStateV2 {
+  id:uint;
+  kind:uint;
+  x:int;
+  y:int;
+  z:int;
+  vx:int;
+  vy:int;
+  dir:uint;
+  hp:int;
+  hp_max:int;
+  mp:int;
+  level:uint;
+  faction:uint;
+  state_flags:uint;
+  buff_mask:ulong;
+  extra:int;            // ← 唯一的新增字段
+}
+
+table StatePacketV2 {
+  tick:uint;
+  seq:uint;
+  scene_id:uint;
+  player_id:ulong;
+  svr_time_ms:ulong;
+  ack_tick:uint;
+  ack_seq:uint;
+  proto_ver:uint;
+  flags:uint;
+  checksum:uint;
+  entities:[EntityStateV2];
+}
+
+table EntityStateT {
+  id:uint;
+  kind:uint;
+  x:int;
+  y:int;
+  z:int;
+  vx:int;
+  vy:int;
+  dir:uint;
+  hp:int;
+  hp_max:int;
+  mp:int;
+  level:uint;
+  faction:uint;
+  state_flags:uint;
+  buff_mask:ulong;
+}
+
+table StatePacketT {
+  tick:uint;
+  seq:uint;
+  scene_id:uint;
+  player_id:ulong;
+  svr_time_ms:ulong;
+  ack_tick:uint;
+  ack_seq:uint;
+  proto_ver:uint;
+  flags:uint;
+  checksum:uint;
+  entities:[EntityStateT];
+}

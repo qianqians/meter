@@ -35,6 +35,33 @@ GOGC=800 ./bench-go.exe 1000 30
 对齐后，**四种变体的字节数在 TS 与 Go 两侧完全一致**（50433 / 64096 / 34006 / 64232），
 这也是这套实现能互相验证的唯一证据。
 
+## 压缩实验：`compress-bench.mjs`
+
+同一份数据（N=1000 快照 / N=60 每 tick 增量），zstd 经 `@mongodb-js/zstd`：
+
+| 编码 | 原始 | zstd-19（N=1000） | zstd-19（N=60） |
+|---|---:|---:|---:|
+| protobuf SoA | 30,993 / 1,898 B | 19.60 KB (65%) | **1.49 KB (80%)** |
+| protobuf AoS | 47,420 / 2,835 B | 29.90 KB (65%) | 2.04 KB (74%) |
+| FlatBuffers AoS | 64,096 / 3,936 B | 24.41 KB (39%) | 1.56 KB (41%) |
+
+**结论**：未压缩时 FB 比 pb SoA 大 107%，压缩后（N=60）只大 **5%**——"省流量"不再构成选格式的理由。
+而**布局的影响被压缩放大**：pb SoA 比 pb AoS 小 **34%**。
+`brotli-11` 压缩率最好（30 KB → 13 KB），但压缩一个 30 KB 包要 **43,647 µs**，不可用。
+
+## 演进实验：给 struct 加一个字段会发生什么
+
+`fb-evolution.mjs` + `schema/fb-evolution.fbs`（同一份字段，外加一个"新增字段"的 struct 版本与一个 table 版本）：
+
+| 实验 | 结果 |
+|---|---|
+| 15 字段 struct 的字节，用 16 字段 struct 解 | **不报错**，但第 0 个实体 id 读成 1000999（真值 1000000）、x 读成 11081（真值 -100000），前 50 个实体 **50/50 全错** |
+| 同一份字节用 table 代码解 | 也不报错（错误用法没有任何提示） |
+| table 数组 vs struct 数组：读 1000 实体 | 36–42 vs 18 ns/实体（**2.0–2.3×**） |
+| table 数组 vs struct 数组：字节 | 74,336 vs 64,096 B（**1.16×**） |
+
+结论被写进 [`docs/protocol-map.md`](../../docs/protocol-map.md) §5：**struct 的演进失败是静默数据损坏**，所以每帧消息的 struct 必须一次预留 4 个 `int` 槽位，上线后只允许占坑。
+
 ## protobuf-es（第三个 protobuf 实现）
 
 `bench-ts.mjs` 里另有两行 `protobuf-es`：`@bufbuild/protobuf` v2 + `protoc-gen-es` 2.6.3 生成的纯 TS

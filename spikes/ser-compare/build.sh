@@ -3,6 +3,8 @@
 #
 # 依赖（一次性）：
 #   npm install                                     # protobufjs / flatbuffers / esbuild / protobufjs-cli
+#                                                    # + @bufbuild/protobuf, @bufbuild/protoc-gen-es（protobuf-es）
+#                                                    # + @mongodb-js/zstd（压缩实验，原生预编译包）
 #   tools/flatc.exe   ← https://github.com/google/flatbuffers/releases (Windows.flatc.binary.zip)
 #   tools/protoc/bin/protoc.exe ← https://github.com/protocolbuffers/protobuf/releases (protoc-*-win64.zip)
 #   protoc-gen-go     ← go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
@@ -12,11 +14,13 @@ set -euo pipefail
 
 ./tools/flatc.exe --ts -o gen/ts schema/state.fbs
 ./tools/flatc.exe --go -o gen/go schema/state.fbs
+./tools/flatc.exe --ts -o gen/ts schema/fb-evolution.fbs
 
 ./node_modules/.bin/pbjs -t static-module -w commonjs -o gen/ts/pb_static.cjs schema/state.proto
 
 # gen/ 不入库，所以打包入口放在仓库里（fb-entry.ts），它 import 的是 gen/ts 下的生成码
-./node_modules/.bin/esbuild fb-entry.ts --bundle --format=esm --platform=node --outfile=gen/js/fb.mjs
+./node_modules/.bin/esbuild fb-entry.ts --bundle --format=esm --platform=node --outfile=gen/js/fb.mjs --resolve-extensions=.ts,.js
+./node_modules/.bin/esbuild fb2-entry.ts --bundle --format=esm --platform=node --outfile=gen/js/fb2.mjs --resolve-extensions=.ts,.js
 
 ./tools/protoc/bin/protoc.exe \
   --plugin=protoc-gen-go="$(go env GOPATH)/bin/protoc-gen-go.exe" \
