@@ -2,7 +2,11 @@
 
 > 配套文档：[`mmorpg-verification-plan.md`](mmorpg-verification-plan.md)（四个必须实测的实验）
 > 上级文档：[`ai-native-game-engine.md`](ai-native-game-engine.md)
-> 状态：**文档级评估，无实测**。本仓库仍无代码、无构建产物。
+> 状态：**文档级评估，无实测**。§7/§8 的前提已被 [`server-engine-stack.md`](server-engine-stack.md) 改写，见下方⚠️。
+
+> ⚠️ **前提变更（2026-11-19）**：§5 的建议、§7（"C# 约束下的候选集"）与 §8（"若服务端用 abelkhan"）建立在一个前提上——**客户端引擎从 Stride / Godot / Unity 中选，且团队与服务端是 C#**。后续的 [`server-engine-stack.md`](server-engine-stack.md) 把这个前提改掉了：客户端以 **Cocos（TS）为一等目标**，逻辑层是 **TS `core`**，gate/dbproxy 是 **Go**。
+> 因此 §5/§7/§8 现在**读作条件命题，不是结论**："若哪天决定复用 abelkhan 的**服务端**，则客户端引擎必须重新在 Stride/Godot(.NET) 之间选，且 TS 逻辑层作废"。这两条路互斥。§1–§4 的引擎对照（网络 / 大世界 / AI / 确定性四个硬缺口）与"权威内核不建在引擎里"这条判断**不受影响**。
+> 仍然成立、且被新文档直接引用的部分：§8.1 的 abelkhan 一手核实、§8.2 的"传输只有 TCP/WebSocket"与 LGPL-2.1 陷阱。
 
 ## 证据等级（沿用主文档附录 B 的纪律）
 
@@ -190,6 +194,8 @@
 ---
 
 ## 8. 若服务端用 abelkhan：Stride 还是 Godot(.NET)
+
+> ⚠️ **本节是条件命题。** 它的前提（客户端 .NET 引擎 + 服务端 abelkhan）在 [`server-engine-stack.md`](server-engine-stack.md) 里已被改为"Cocos(TS) + Go gate + TS `core`"。§8.1/§8.2 的核实结论仍被新文档引用；§8.3 的引擎判定只在"决定复用 abelkhan 服务端"时才生效——而那意味着 TS 逻辑层整段作废。
 
 ### 8.1 abelkhan 是什么（先核实，不凭记忆）
 

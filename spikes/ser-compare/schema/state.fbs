@@ -1,0 +1,67 @@
+namespace s2;
+
+// 与 state.proto 的 EntityState 字段集完全相同。
+// 用 struct（定长内联记录）而不是 table：状态包里的实体行就是这个形状，
+// 这也正是 flatc 对这种情况会生成的代码（零拷贝、定步长数组）。
+struct EntityState {
+  id:uint;
+  kind:uint;
+  x:int;
+  y:int;
+  z:int;
+  vx:int;
+  vy:int;
+  dir:uint;
+  hp:int;
+  hp_max:int;
+  mp:int;
+  level:uint;
+  faction:uint;
+  state_flags:uint;
+  buff_mask:ulong;
+}
+
+table StatePacket {
+  tick:uint;
+  seq:uint;
+  scene_id:uint;
+  player_id:ulong;
+  svr_time_ms:ulong;
+  ack_tick:uint;
+  ack_seq:uint;
+  proto_ver:uint;
+  flags:uint;
+  checksum:uint;
+  entities:[EntityState];
+}
+
+// 列式变体：每个字段一个 vector。
+table StatePacketSoA {
+  tick:uint;
+  seq:uint;
+  scene_id:uint;
+  player_id:ulong;
+  svr_time_ms:ulong;
+  ack_tick:uint;
+  ack_seq:uint;
+  proto_ver:uint;
+  flags:uint;
+  checksum:uint;
+  id:[uint];
+  kind:[uint];
+  x:[int];
+  y:[int];
+  z:[int];
+  vx:[int];
+  vy:[int];
+  dir:[uint];
+  hp:[int];
+  hp_max:[int];
+  mp:[int];
+  level:[uint];
+  faction:[uint];
+  state_flags:[uint];
+  buff_mask:[ulong];
+}
+
+root_type StatePacket;

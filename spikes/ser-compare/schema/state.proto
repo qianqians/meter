@@ -1,0 +1,68 @@
+syntax = "proto3";
+
+package s2;
+
+option go_package = "s2bench/schema;schema";
+
+// 一份 MMO 状态包：10 个头字段 + 每实体 15 个字段。
+// AoS 与 SoA 两个变体字段集完全相同，只有布局不同 —— 用来把"格式差异"与"布局差异"分开。
+message EntityState {
+  uint32 id = 1;
+  uint32 kind = 2;
+  sint32 x = 3;
+  sint32 y = 4;
+  sint32 z = 5;
+  sint32 vx = 6;
+  sint32 vy = 7;
+  uint32 dir = 8;
+  sint32 hp = 9;
+  sint32 hp_max = 10;
+  sint32 mp = 11;
+  uint32 level = 12;
+  uint32 faction = 13;
+  uint32 state_flags = 14;
+  uint64 buff_mask = 15;
+}
+
+message StatePacket {
+  uint32 tick = 1;
+  uint32 seq = 2;
+  uint32 scene_id = 3;
+  uint64 player_id = 4;
+  uint64 svr_time_ms = 5;
+  uint32 ack_tick = 6;
+  uint32 ack_seq = 7;
+  uint32 proto_ver = 8;
+  uint32 flags = 9;
+  uint32 checksum = 10;
+  repeated EntityState entities = 11;
+}
+
+// 同一份数据的列式布局：每个字段一条 packed 数组。
+message StatePacketSoA {
+  uint32 tick = 1;
+  uint32 seq = 2;
+  uint32 scene_id = 3;
+  uint64 player_id = 4;
+  uint64 svr_time_ms = 5;
+  uint32 ack_tick = 6;
+  uint32 ack_seq = 7;
+  uint32 proto_ver = 8;
+  uint32 flags = 9;
+  uint32 checksum = 10;
+  repeated uint32 id = 11 [packed = true];
+  repeated uint32 kind = 12 [packed = true];
+  repeated sint32 x = 13 [packed = true];
+  repeated sint32 y = 14 [packed = true];
+  repeated sint32 z = 15 [packed = true];
+  repeated sint32 vx = 16 [packed = true];
+  repeated sint32 vy = 17 [packed = true];
+  repeated uint32 dir = 18 [packed = true];
+  repeated sint32 hp = 19 [packed = true];
+  repeated sint32 hp_max = 20 [packed = true];
+  repeated sint32 mp = 21 [packed = true];
+  repeated uint32 level = 22 [packed = true];
+  repeated uint32 faction = 23 [packed = true];
+  repeated uint32 state_flags = 24 [packed = true];
+  repeated uint64 buff_mask = 25 [packed = true];
+}

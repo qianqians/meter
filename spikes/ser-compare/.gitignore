@@ -1,0 +1,7 @@
+# 工具链二进制（flatc / protoc，从官方 release 下载，不入库）
+tools/
+# 生成的代码（用 build.sh 重新生成）
+gen/
+schema/state.pb.go
+node_modules/
+bench-go.exe

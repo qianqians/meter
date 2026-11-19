@@ -1,0 +1,8 @@
+{
+  "name": "imports-field-demo",
+  "private": true,
+  "type": "module",
+  "imports": {
+    "#core/*": "./core/*"
+  }
+}

@@ -1,0 +1,234 @@
+{
+  "version": 6,
+  "todos": [],
+  "groups": [
+    {
+      "id": "g_9e87f27aa0eb",
+      "title": "验证 protobuf-es：erasable / 性能 / 包体",
+      "todos": [
+        {
+          "id": "t_9cdb2671b695",
+          "title": "验 protobuf-es 与 erasableSyntaxOnly 兼容性",
+          "status": "done",
+          "origin": "agent",
+          "createdAt": "2026-11-19T10:25:22.311Z",
+          "updatedAt": "2026-11-19T10:33:10.561Z",
+          "note": "生成 state_pb.ts 后看是否含 TS enum / 参数属性，再用 tsc + erasableSyntaxOnly 真编一遍",
+          "summary": "装了 `@bufbuild/protobuf@2` + `@bufbuild/protoc-gen-es@2`（2.6.3）并生成 `gen/es/state_pb.ts`，结论：**兼容**。\n\n- 生成物是**真 TS 源**：type-only interface（`export type EntityState = Message<\\\"s2.EntityState\\\"> & {...}`）+ `MessageSchema` 常量，**没有 enum / class / namespace / 参数属性**\n- `tsc -p es-check`（`erasableSyntaxOnly` + `verbatimModuleSyntax` + strict，TS 5.9）→ **exit 0**，路径写在 `spikes/ser-compare/es-check/tsconfig.json`\n- 对照：protobufjs 的 `pbts` 类型声明**也能**过 erasable 检查（ambient namespace 在 .d.ts 里是合法的）——所以这条判据**不区分两者**；protobufjs 真正的冲突是它的运行时是 **CommonJS**（本轮实测必须 `createRequire` 才进得了 ESM）\n\n顺带解决了一个 Windows 工程坑：`protoc` 与 `buf generate` 都要求插件是**可执行文件**，而 npm 只生成 `protoc-gen-es.cmd/.ps1`，两种工具都以 `'.' 不是内部或外部命令` 失败（两个都试过）。改用 `gen-es.mjs`：protoc 只出 `FileDescriptorSet`，自己构造 `CodeGeneratorRequest` 喂插件 stdin、读回 `CodeGeneratorResponse` 写文件——这就是 protoc 内部做的两步。",
+          "verification": "- `node spikes/ser-compare/gen-es.mjs` → 写出 `gen/es/state_pb.ts`（7049 bytes）\n- `grep -n \"enum \\\\|class \\\\|abstract\\\\|private \" gen/es/state_pb.ts` → 无匹配\n- `npx -p typescript@5.9 tsc -p spikes/ser-compare/es-check` → exit 0\n- `./tools/protoc/bin/protoc.exe --plugin=protoc-gen-es=./node_modules/.bin/protoc-gen-es.cmd …` → 失败（记录在案）；`buf generate` 同样失败 → 改用 gen-es.mjs 后成功",
+          "commitSubject": "spikes: 验证 protobuf-es 的 erasable 兼容性与代码生成"
+        },
+        {
+          "id": "t_27e64bb5448c",
+          "title": "量 protobuf-es vs protobufjs 的读写性能",
+          "status": "done",
+          "origin": "agent",
+          "createdAt": "2026-11-19T10:25:22.311Z",
+          "updatedAt": "2026-11-19T10:33:10.563Z",
+          "note": "同一份 1000 实体数据，protobuf-es 变体加进 bench-ts.mjs；先验证字节流仍与 Go 一致（50433）",
+          "summary": "在 `bench-ts.mjs` 里加了 protobuf-es 的 AoS / SoA 两个变体（64 位直接用原生 bigint，不需要 protobufjs 那套 string 转换），N=1000、3 次取区间：\n\n- protobuf-es AoS：encode **1416–1462 µs**、wrap 823–848、read **846–876 µs** —— **比 protobufjs 慢 1.5×**（747–761 / 586–589）\n- protobuf-es SoA：encode 562–582 µs（与 protobufjs 持平）、read **176–181 µs** —— **比 protobufjs 快 2.7×**（484–498）\n- 字节数仍与 Go 侧完全一致（50433 / 34006）→ **三种实现（protoc-gen-go、protobufjs、protobuf-es）产出的字节流逐字节相同**，这同时验证了三者语义一致\n\n**反直觉结论**：protobuf-es 的 `create()`/`fromBinary()` 会把每个 message 的默认字段填满，所以在\"1000 个小 message\"这条路上它比 protobufjs 更贵；只有在 packed 标量数组上它的薄包装才体现出来。所以「换新库买性能」这个动机在 AoS 路径上不成立。",
+          "verification": "- `node spikes/ser-compare/bench-ts.mjs 1000 200` ×3 → AoS 1417/1429/1416 µs、SoA read 176/181/178 µs，轮间 < 3%\n- 六组实现的 bytes 列：50433 / 64096 / 34006 / 64232 与 Go 侧逐行对齐\n- `node bench-ts.mjs 1000 120` 复跑 → 数值与上面一致",
+          "commitSubject": "spikes: 量 protobuf-es 与 protobufjs 的读写性能"
+        },
+        {
+          "id": "t_0003c0acfcf5",
+          "title": "量两侧的打包体积",
+          "status": "done",
+          "origin": "agent",
+          "createdAt": "2026-11-19T10:25:22.311Z",
+          "updatedAt": "2026-11-19T10:33:13.649Z",
+          "note": "esbuild --minify 分别打 protobuf-es 与 protobufjs 的产物，看客户端包体差多少（Cocos 单包预算敏感）",
+          "summary": "用 esbuild `--bundle --minify --format=esm` 分别打三份产物（同一份 schema，三个 message），再用 zlib level 9 量 gzip：\n\n| 产物 | minified | gzip |\\n|---|---:|---:|\\n| protobuf-es v2（schema + 运行时） | 100.5 KB | **27.7 KB** |\\n| protobufjs 7（静态码 + 运行时） | 70.6 KB | 16.0 KB |\\n| flatbuffers 25（生成码 + 运行时） | 23.6 KB | **4.1 KB** |\n\n对 Cocos/小游戏这种包体敏感的目标，结论很直接：**为状态同步引入 protobuf-es 要多付 +11.7 KB gzip，而 FlatBuffers 只要 4.1 KB**。这一步也暴露了一个 esbuild 细节：`--platform=neutral` 不读 `main` 字段，flatbuffers 包会解析失败——改用 `--platform=browser` 才能出包（已写进 build.sh）。\n\n三条命令都并进了 `build.sh`，产物落在 `gen/size/`（gitignored）。",
+          "verification": "- `esbuild es-entry.ts --bundle --minify --format=esm --platform=neutral` → protobuf-es 100.5 KB / gzip 27.7 KB\n- `esbuild gen/ts/pb_static.cjs --bundle --minify --format=esm --platform=neutral` → protobufjs 70.6 KB / gzip 16.0 KB\n- `esbuild fb-entry.ts --bundle --minify --platform=browser`（platform=neutral 会因 main 字段解析失败）→ flatbuffers 23.6 KB / gzip 4.1 KB\n- `bash -n build.sh` → 语法 ok；clean 后重跑 build.sh 全链路成功",
+          "commitSubject": "spikes: 量三种序列化库的客户端包体"
+        },
+        {
+          "id": "t_f54dbf7b754e",
+          "title": "把三条结果写回文档",
+          "status": "done",
+          "origin": "agent",
+          "createdAt": "2026-11-19T10:25:22.311Z",
+          "updatedAt": "2026-11-19T10:33:17.920Z",
+          "note": "三条结果写进 §8.2 与 spikes/ser-compare/README，并把“TS 端用哪个库”写成明确结论",
+          "summary": "新增 `docs/server-engine-stack.md` **§8.3「S2 的衍生问题：TS 侧到底用哪个 protobuf 库」**，并三处交叉引用：\n\n- **§8.3 主体**：三条判据的对照表（`erasableSyntaxOnly` 兼容性 / 64 位语义 / 包体）、性能表（protobufjs vs protobuf-es × AoS/SoA）、\"protobuf-es 并不普遍更快\"的反直觉解释、三条落地结论、Windows codegen 坑与解法\n- **结论**：服务端/RPC/落库用 **protobuf-es v2**（bigint 原生、纯 ESM TS、字节流与 protoc-gen-go 一致）；**客户端不要为状态同步引入任何 protobuf 库**（FB 只要 4.1 KB gzip、读 104 µs）；protobufjs 只在\"必须运行时动态加载 .proto\"时留用\n- **§4 加交叉引用**：`core` 的\"三种方式消费\"这条要求会传导到库选择上——protobuf-es 出真 TS 能进来，protobufjs 出 CJS 进不来\n- **§8.2 里 protobuf 那两行改名为 `protobufjs`**，避免和 protobuf-es 混淆\n\n同步更新 `spikes/ser-compare/README.md`（protobuf-es 小节 + erasable 验证命令 + codegen 坑）、`spikes/README.md`（第四节补一段）、根 `README.md`（断言表那一行补 protobuf-es 与三个包体数字）。`build.sh` 补上 `gen-es.mjs`、`pbes.mjs` 与三份 size 产物的构建步骤。\n\n清掉了失败的尝试留下的 `buf.yaml` / `buf.gen.yaml` / `es-check-pbjs`（后者对应的结论已写进文档，但目录本身无法由 build.sh 重放，留着反而误导）。",
+          "verification": "- 链接校验（README / server-engine-stack / spikes README / ser-compare README）→ 全部存在\n- `npx -p typescript@5.9 tsc -p spikes/ser-compare/es-check` → exit 0\n- `node spikes/ser-compare/bench-ts.mjs 1000 120` → 六组变体全部出数，bytes 与 Go 侧一致\n- `git status --porcelain -uall` → 未跟踪文件里没有 gen/、node_modules/、*.exe、state.pb.go",
+          "commitSubject": "docs: 补 §8.3 TS 侧 protobuf 库选型"
+        }
+      ]
+    },
+    {
+      "id": "g_c12c2f850c83",
+      "title": "S1：TS core 真实形状的每 tick 耗时",
+      "todos": [
+        {
+          "id": "t_113fca24cdc4",
+          "title": "写 S1：真实形状的每 tick 基准",
+          "status": "done",
+          "origin": "agent",
+          "createdAt": "2026-11-19T09:55:46.597Z",
+          "updatedAt": "2026-11-19T09:57:52.659Z",
+          "note": "SoA 组件数组 + 均匀网格 AOI + 属性 diff + 位压缩，分阶段计时（网格重建 / 查询 / diff+打包），1万与3万实体、10Hz与20Hz",
+          "summary": "新增 `spikes/aoi-tick/bench.mjs`：一个 MMO 场景的完整 tick 流水，四段分别计时、循环内零分配。\n\n- ① 积分 ② 网格重建（计数排序：清计数→计数→前缀和→散列）③ AOI 查询（3×3 邻居格 + 平方距离过滤，结果写入每观察者的可见列表）④ diff+打包（id/x/y/hp/flags/faction 列式量化进连续字节流）\n- **世界尺寸随实体数按比例放大**，让\\\"3×3 邻居恒为 ~36 个可见实体\\\"——第一版把世界固定成 2000²，3 万实体那一档密度凭空翻 3 倍，测出来是假性超线性（28ms vs 线性外推的 15ms）\n- 踩过一次坑：`out`（打包缓冲）没从 `makeScene` 返回，`off + REC_BYTES > out.length` 直接 `undefined.length` 崩掉——修完后缓冲改成一个 tick 顺序追加的连续块（= 真正要发给客户端的字节流），而不是每观察者预留固定区（后者在 3 万实体时按 256×12 预留会吃 90MB）\n- 稳定性：连跑 3 次，1 万实体 5.18/5.21/5.23 ms，3 万 15.76/15.77/15.83 ms",
+          "verification": "- `node --check spikes/aoi-tick/bench.mjs` → syntax ok\n- `node spikes/aoi-tick/bench.mjs` ×3 → 400:0.17 / 1000:0.45 / 5000:2.45 / 10000:5.21 / 30000:15.77 ms（dropped 全为 0）\n- 三段之和与整体 span 一致（如 1 万实体：0.02+0.04+3.15+1.96≈5.17 vs 5.21）",
+          "commitSubject": "spikes: 新增 S1 场景 tick 基准与机器数折算",
+          "artifacts": [
+            {
+              "kind": "change",
+              "path": "spikes/aoi-tick/bench.mjs"
+            },
+            {
+              "kind": "change",
+              "path": "spikes/aoi-tick/scale.mjs"
+            }
+          ]
+        },
+        {
+          "id": "t_04dcd8aa8caf",
+          "title": "跑出机器数折算",
+          "status": "done",
+          "origin": "agent",
+          "createdAt": "2026-11-19T09:55:46.597Z",
+          "updatedAt": "2026-11-19T09:57:52.125Z",
+          "note": "单场景每 tick 毫秒 → 每核可托场景数 → CCU 3000-5000 所需核数/机器数，并与 §7-④ 的口径对齐",
+          "summary": "新增 `spikes/aoi-tick/scale.mjs`，把\\\"每 tick 毫秒\\\"折算成\\\"要几核\\\"，并把所有可改的参数集中到 `ASSUME`，与实测值表 `MEASURED` 严格分开。\n\n关键结论（假设：DAU 2w × 峰值 20% = CCU 4000、单场景 80 玩家 + 4 倍怪物 = 400 实体、30% 场景战斗 20Hz）：\n\n- 逻辑层骨架合计 **110.5 ms/s = 11.1% 单核**；乘上未建模工作的 3× 乐观倍数 ⇒ **33.2% 单核**，按 50% 预算只需 **0.66 核**\n- 极端情形：3 万实体单一大场景 @20Hz = 31.5% 单核（P95 16.89ms / 50ms 预算）；每场景 20 人的小场景 × 200 = 34% 单核——都进得去单核\n- 显式列出五条未建模项（战斗判定/技能、NPC AI 与寻路、RPC 派发、DB 回调与 GC、网络发送），并声明结论只能按\\\"骨架成本\\\"使用\n\n**这条折算顺带推翻了文档 §0 的一句推断**：原文写\\\"CPU 有两个数量级以上余量\\\"，实测只有 1.5–9×（11% 原始 / 33% 含 3× 折算 / 50% 预算），修正会在下一步写回。",
+          "verification": "- `node spikes/aoi-tick/scale.mjs` → 逻辑 110.5 ms/s = 11.1% 单核；×3 ⇒ 33.2% ⇒ 0.66 核；A/B/C 三种极端情形全部输出\n- 折算用到的实测点与 `bench.mjs` 输出逐行核对一致（400 实体 0.17ms、30000 实体 15.77ms）",
+          "commitSubject": "spikes: 把 S1 的 tick 成本折算成核数"
+        },
+        {
+          "id": "t_ec6fd9c170c6",
+          "title": "把 S1 结果写回文档",
+          "status": "done",
+          "origin": "agent",
+          "createdAt": "2026-11-19T09:55:46.597Z",
+          "updatedAt": "2026-11-19T09:58:22.617Z",
+          "note": "写 S1 结论（通过/不通过/部分下沉建议），并更新 §7-⑧ 与 README 的断言表",
+          "summary": "S1 结果分成三处写回：\n\n- **`docs/server-engine-stack.md` §8 重构**：从\"下一步：五个 spike\"改成\"五个 spike：S1/S2 已执行，S3–S5 待跑\"，新增 §8.1（方法三设计 + 五档实测表 + 判据对照 + 折算核数 + 阶段归因 + 未建模声明）\n- **§7-⑧ 从【未核实】改为 ✅ 已核实**，并指向 §8.1\n- **§0 第 1 条的量级表述被实测推翻并修正**：原文\"CPU 有两个数量级以上余量\"是无实验支撑的猜测，实测只有 1.5–9×（11.1% 原始 / 33.2% 含 3× 折算）。改成\"逻辑层骨架占 0.2–0.7 核，机器数由 gate 与 DB 决定\"——方向没变，量级说错了\n\n两条实质结论：\n- **③查询 + ④打包占 96–98% 的 tick**，①积分 + ②网格只占 1–4%。真实场景单实体成本 425 ns，是纯积分（0.9 ns）的 **470 倍**——贵的全在 AOI 与打包上，所以优化顺序是\"先 AOI、再打包\"\n- 判据\"1 万实体 10Hz < 5 ms\"实测 **5.21 ms，差 4%，未达成**——没有四舍五入成\"通过\"；同时指出该判据对应的是\"全区全服挤一个场景\"的极端形态，真实配置（400 实体/场景）是判据阈值的 1/30\n\n同步更新 `spikes/README.md`（新增第三节 aoi-tick、重排后续章节号、补复现命令）与根 `README.md` 的断言表（五条）。",
+          "verification": "- `node spikes/aoi-tick/scale.mjs` → 110.5 ms/s = 11.1% 单核，×3 ⇒ 33.2% ⇒ 0.66 核\n- 文档内新增的 8 个 `../spikes/aoi-tick/*` 与 markdown 链接 → 全部存在（脚本校验）\n- `grep '^## ' spikes/README.md` → 章节号连续（一/二/三/四/五 + 复现），无重号",
+          "commitSubject": "docs: 写回 S1 实测结果并修正量级表述"
+        }
+      ]
+    },
+    {
+      "id": "g_7fe0ff5c3258",
+      "title": "S2：flatbuffer vs protobuf 实测",
+      "todos": [
+        {
+          "id": "t_fd82477c40b3",
+          "title": "搭 S2：两种序列化的等价实现",
+          "status": "done",
+          "origin": "agent",
+          "createdAt": "2026-11-19T09:55:46.597Z",
+          "updatedAt": "2026-11-19T10:11:31.487Z",
+          "note": "同字段同列式布局：protobuf（packed 数组）vs FlatBuffers（table + vector），TS 与 Go 两侧各一份",
+          "summary": "新增 `spikes/ser-compare/`：同一份 schema（10 头字段 + 每实体 15 字段）用 `state.proto` 与 `state.fbs` 各写一遍，生成 TS 与 Go 两份实现，并加 AoS / SoA 两个布局变体，共 4 组 + JSON 基线。\n\n- 工具链落到本地：flatc 24.3.25 与 protoc 28.3 的官方 release 二进制下载到 `tools/`（不入库），`build.sh` 一键重建全部生成物，`gen/` 与 `node_modules/` 一并 gitignore\n- Go 侧模块依赖走 `GOPROXY=direct GOSUMDB=off`（proxy.golang.org 与 sum.golang.org 在本环境不可达），依赖已进本地 module cache\n- **一致性验证**（这是整套东西唯一有意义的证据）：两边对同一条实体的编码字节流逐字节相同（len 66 同 hex），四种变体在 TS/Go 两侧的总字节数完全一致：50433 / 64096 / 34006 / 64232\n- 为此修掉两个真实缺陷：① protobufjs 的 uint64 不认 `bigint`，会**静默写 0**（playerId/buffMask 必须用 string/number）；② protobufjs 会写出显式设成 0 的字段而 protoc-gen-go 省略默认值 → TS 侧改成建对象时跳过零值才对齐\n- 计时坑：本机 Go 单调时钟对微秒级区间常报 0 ns（一次 FB `wrap` 就落在分辨率里），改成批量计时 + 如实标 `<LOD`，不伪造数字",
+          "verification": "- `./build.sh` → flatc/protoc/pbjs/esbuild 全链路通过，产出 `gen/ts/pb_static.cjs`、`gen/js/fb.mjs`、`schema/state.pb.go`、`gen/go/s2/*.go`、`bench-go.exe`\n- 单实体编码对拍：TS `len 66` 与 Go `len 66` 的 hex 完全相同\n- `node bench-ts.mjs 1000 300` ×3 → 字节数 50433/64096/34006/64232/178993，数值稳定（encode 750–771µs、read 差 5×）\n- `GOGC=800 ./bench-go.exe 1000 30` ×3 → 同样四组字节数，read 稳定（FB AoS 5.0–5.4µs vs pb AoS 164–166µs）\n- 清空重建 `go build` 后重跑 6 次 → 数字稳定（确认此前 2× 差异来自旧二进制，不是测量噪音）",
+          "commitSubject": "spikes: 新增 S2 flatbuffer/protobuf 双语言基准"
+        },
+        {
+          "id": "t_1ffd5fcc562d",
+          "title": "量 encode/decode 与字节数",
+          "status": "done",
+          "origin": "agent",
+          "createdAt": "2026-11-19T09:55:46.597Z",
+          "updatedAt": "2026-11-19T10:11:31.488Z",
+          "note": "encode / decode / 字节数，1000 行实体状态；需先核实 protobufjs 动态模式与生成码的差距",
+          "summary": "N=1000 实体，两侧各跑 3 次取区间（Go 为 GOGC=800、批量计时的最快样本；Node 为 300 次最快值）：\n\n**Go 1.23.10**\n- pb AoS：encode 206–214µs、50.4 B/实体、read 164–166µs（166 ns/实体）\n- FB AoS：build 71–74µs、64.1 B/实体、read 5.0–5.4µs（**5 ns/实体**）\n- pb SoA：encode 55–57µs、**34.0 B/实体**、read 50.7–50.9µs\n- FB SoA：build 53–58µs、64.2 B/实体、read 18.9–20.4µs\n\n**Node 18.20.8**\n- pb AoS：750–771µs / 50.4 B / read 578–586µs；FB AoS：150–171µs / 64.1 B / read 103–104µs；pb SoA：550–553µs / 34.0 B / 482–503µs；FB SoA：254–262µs / 64.2 B / 150–167µs；JSON：902µs / 179 B / 627–634µs\n\n三条结论：\n- **字节数 pb 全胜**（AoS 小 21%、SoA 小 47%）：varint+zigzag+省略默认值 vs 定宽+每字段占位\n- **读 FB 全胜，Go 里是碾压级**：AoS 5 ns vs 166 ns（33×）、SoA 19 vs 51（2.7×）\n- **格式与布局正交**：同样的 pb，改 SoA 让字节 −33%、读 −69%；同样改 FB 的 SoA，字节不变而读**变慢 4×**（5→19 ns，因为每字段一次 vector 偏移解析）。所以\\\"换格式\\\"和\\\"换布局\\\"是两个独立决定，不存在一个变体在两个维度同时赢\n\n附带一个可复用的事实：JSON 比 pb AoS 大 3.5×、读慢 3.8× —— 热路径\\\"JSON 兜底\\\"不成立。",
+          "verification": "- `node spikes/ser-compare/bench-ts.mjs 1000 300` ×3 → 数值如 summarised，轮间差异 < 5%\n- `GOGC=800 spikes/ser-compare/bench-go.exe 1000 30` ×3 + 清空重建后 ×6 → 稳定，无 2× 漂移\n- 两侧字节数逐组一致（50433/64096/34006/64232）→ 说明比较的是同一份数据、同一套语义",
+          "commitSubject": "spikes: 量出四种序列化的字节与读写耗时"
+        },
+        {
+          "id": "t_3a1a1f191d6a",
+          "title": "把 S2 结果写回文档并给协议裁决",
+          "status": "done",
+          "origin": "agent",
+          "createdAt": "2026-11-19T09:55:46.597Z",
+          "updatedAt": "2026-11-19T10:12:28.115Z",
+          "note": "差距是否 > 2× → 能否砍掉一个协议；写进 §7-① 与 §8-S2，并标注两侧实测的边界",
+          "summary": "S2 结论写回三处，并顺带把文档里过时的证据等级改掉：\n\n- **§8.2 新增**：为什么必须做 AoS/SoA 两套布局、字节流一致性验收条件（50433/64096/34006/64232 + 单实体 hex 逐字节相同）、四种变体在 Go 与 Node 两侧的实测表、三个结论（pb 字节小 21–47%；FB 读快 21–33×；格式与布局**正交且方向相反**——pb→SoA 赚字节与读，FB→SoA 只赚不到字节还慢 4×）、两个必须记的坑（protobufjs 的 uint64 静默写 0；protobufjs 写显式 0 而 Go 省略默认值）、未建模项\n- **§0 协议行从【未核实】改成决策**：\\\"每帧广播用 FlatBuffers（AoS struct），请求-响应/配置/落库用 protobuf\\\"\n- **§7-① 关掉**：原判据\\\"差距 > 2× 才值得保留双协议\\\"被废掉——因为**没有任何一个变体在两个维度同时赢**，问题不是\\\"留一个还是留两个\\\"，而是\\\"按频率与方向分工\\\"。这与用户最初的\\\"底层 flatbuffer + 逻辑层 protobuf\\\"结论相同，但分界线从\\\"分层\\\"改成\\\"频率\\\"：按层分会在两个方向上都选错（gate 的握手是低频的，用 pb 就够；逻辑层的每 tick 广播是高频的，必须 FB）\n- 附录 A 补 Go 1.23.10 与序列化工具链版本；附录 B 与根 README 的\\\"适用范围\\\"声明跟着更正（现在 S1 含 AOI、S2 含序列化，不能再说\\\"无 AOI / 无序列化\\\"）",
+          "verification": "- `node spikes/ser-compare/bench-ts.mjs 1000 300` ×3 与 `GOGC=800 spikes/ser-compare/bench-go.exe 1000 30` ×3 → 字节数四组全部一致，时间值写进文档的区间内\n- 清空 `gen/`、`state.pb.go`、`bench-go.exe` 后跑 `./build.sh` 再跑两侧 → 复现同一组数字（确认 build.sh 是完整可重放的）\n- 链接校验脚本（4 个 markdown：根 README / 技术栈文档 / 引擎选型 / spikes README / ser-compare README）→ 全部存在\n- `git status --porcelain -uall` → 未跟踪文件里没有 gen/、tools/、node_modules/、*.pb.go、*.exe（确认生成物没漏进仓库）",
+          "commitSubject": "docs: 写回 S2 结果并把协议决策改成按频率分工"
+        }
+      ]
+    },
+    {
+      "id": "g_e6a9c76d6ec8",
+      "title": "把服务器引擎技术栈写进 meter 文档",
+      "todos": [
+        {
+          "id": "t_be029fbd7009",
+          "title": "把旧会话的基准脚本整理进 spikes/",
+          "status": "done",
+          "origin": "agent",
+          "createdAt": "2026-11-19T09:45:42.380Z",
+          "updatedAt": "2026-11-19T09:48:10.606Z",
+          "note": "node_bench.mjs / perf.pyx+bench.py+setup.py / bench-ts-perf.mjs / rpc-types-demo.ts，补一份 README 说明怎么复现；顺手修掉 bench.py 里那行算错的参照值",
+          "summary": "新建 `spikes/`（本仓库第一份代码），把前一会话散落在 chat 临时目录里的三个基准整理成可复现的资产：\n\n- 拆成 `ts-vs-python/`（`node_bench.mjs`、`perf.pyx`、`setup.py`、`bench.py`）、`ts-runtime/`（`bench-ts-perf.mjs`）、`rpc-typing/`（`rpc-types-demo.ts` + 新增 `negative.ts` + `tsconfig.json`）、外加一份 `README.md` 记纪律/结果/复现命令与机型\n- 修掉前一会话 `bench.py` 两处缺陷：末行那个写错的\\\"参照值\\\"（`95.6e6/OPS/60*60`，量纲都不对），以及 `integrate_raw` 把 `malloc` + 初始化放进计时区导致裸指针被多算成本\n- 新增 `negative.ts`：四条错用各配一条 `@ts-expect-error`，让\\\"这套 RPC 类型是否安全\\\"变成一条能进 CI 的断言\n- 新增 `spikes/.gitignore`：`.pyd`/`.c`/`build/` 不入库（根 `.gitignore` 只忽略 `*.so`，Windows 产物会漏）\n\n没有照抄原样：`node_bench.mjs` 加了循环预热与中位数取样，`perf.pyx` 把裸指针版改成 `cdef class RawWorld`（分配只做一次）——否则测到的是 malloc。",
+          "verification": "- `node spikes/ts-vs-python/node_bench.mjs` → 3 次跑出 0.879 / 0.973 / 0.902 ns/op\n- `python setup.py build_ext --inplace` → 生成 `perf.cp314-win_amd64.pyd`\n- `python spikes/ts-vs-python/bench.py` → 五种写法全部输出\n- `node spikes/ts-runtime/bench-ts-perf.mjs` → 5 组对照全部跑完\n- `npx -p typescript@5.9 tsc -p spikes/rpc-typing` → exit 0，正例通过且 4 条 `@ts-expect-error` 均被触发",
+          "commitSubject": "spikes: 把服务端性能基准整理成可复现脚本",
+          "artifacts": [
+            {
+              "kind": "commit",
+              "sha": "36e12c5e3af46be41e2a7eb6b4bd259bde1353b6",
+              "label": "把旧会话的基准脚本整理进 spikes/"
+            }
+          ]
+        },
+        {
+          "id": "t_af2fa6743252",
+          "title": "在本机重跑基准，拿到可引用的数字",
+          "status": "done",
+          "origin": "agent",
+          "createdAt": "2026-11-19T09:45:42.380Z",
+          "updatedAt": "2026-11-19T09:48:39.784Z",
+          "note": "ns/实体·tick 与 TS 数据布局 3 组对照，确认与旧会话数字一致（或修正它）",
+          "summary": "在本机（i5-14400F / Node 18.20.8 / Python 3.14.6 / numpy 2.5.4 / Cython 3.3.1 / MSVC 14.51）把三组基准各跑 2–3 次，拿到三个可引用数字，并推翻了前一会话两个结论：\n\n- **计时口径错了**：前一会话报的 `numpy 2.87`、`Cython memoryview 2.71` 把 `list → ndarray` 转换算进了积分循环。移出计时区后：memoryview 0.79–0.82、numpy 0.89–0.91 —— 与 V8 的 0.88–0.97 在 ±10% 内重合\n- **因此\\\"只有裸指针能追平 V8、Cython 优化是手艺活\\\"作废**：裸指针 0.72–0.73 只再快 11%；保留的判断是\\\"地板差 79 倍（69.6 vs 0.88）、天花板三方重合\\\"\n- 顺带修掉旧 `bench.py` 末行写错的参照值，并把裸指针版重写成 `cdef class RawWorld`（分配只做一次），否则 malloc 被计进循环\n- TS 侧 5 组对照（序列化 130× > 数据布局 3.55× > 遍历 7× / 分配 7× > 调用点 5.2×）与前一会话量级一致\n- RPC 类型 `tsc -p .` → exit 0：正例通过 + 4 条 `@ts-expect-error` 全部触发",
+          "verification": "- `python spikes/ts-vs-python/bench.py` ×3 → 稳定：纯 list 69.6/70.6/71.5、array 153.7/154.5/155.5、numpy 0.89/0.90/0.91、memoryview 0.79/0.81/0.82、裸指针 0.72/0.72/0.73\n- `node spikes/ts-vs-python/node_bench.mjs` ×3 → 0.879 / 0.973 / 0.902 ns/op\n- `node spikes/ts-runtime/bench-ts-perf.mjs` → AoS 302.4 / SoA 85.2ms、for 10.0 / for...of 69.8 / reduce 116.3ms、逃逸 16.6 / 对象池 2.4 / 不逃逸 0.5ms、JSON 67.9 / DataView 0.5ms、megamorphic 83.1 / mono 16.0ms\n- `npx -p typescript@5.9 tsc -p spikes/rpc-typing` → exit 0",
+          "commitSubject": "spikes: 重跑基准并修正计时口径"
+        },
+        {
+          "id": "t_b3c5146eeb16",
+          "title": "写 docs/server-engine-stack.md",
+          "status": "done",
+          "origin": "agent",
+          "createdAt": "2026-11-19T09:45:42.380Z",
+          "updatedAt": "2026-11-19T09:50:24.191Z",
+          "note": "决策表 + 硬约束 + 实测基线 + TS 工具链坑 + 风险/未核实清单 + 与 mmorpg-engine-choice.md §8 的 abelkhan 结论对齐",
+          "summary": "新增 `docs/server-engine-stack.md`（392 行），把前一会话���一路被推翻出来的结论固化成仓库里的第 6 份文档。结构：\n\n- **§0 定稿表 + 一句实话**：gate/dbproxy=Go、逻辑层=TS `core`、热路径=Cython 按需下沉、Cocos 为一等目标；并写明\\\"这不是被性能决定的\\\"——真约束是连续可调性、热更、客户端共享三件结构性条件\n- **§1 需求收敛史（V1→V6）**：每版新增前提 → 推翻了什么。C# 不是被性能淘汰（.NET 8 够用），是被\\\"客户端= Cocos(TS)\\\"淘汰；Scala 是被\\\"Orleans 是平台 / Pekko 是工具包\\\"+\\\"多一层要自己拼\\\"淘汰；Python 没淘汰，被降级为内核工具链\n- **§2 分层 + 每层\\\"禁止做什么\\\"**：把\\\"内核是唯一写者\\\"落到跨语言边界（kernel 不许成为第二套业务逻辑），三条 CI 硬规矩\n- **§3 实测**（唯一硬的地方）：地板 79×、天花板三方重合；**并保留第一版计时口径错误的修正记录**（转换成本算进循环让结论差 3 倍）；TS 侧收益排序 序列化130× > 遍历/分配 7× > 调用点 5.2× > 布局 3.55×，外加 deopt 静默陷阱\n- **§4 TS 工程纪律**：擦除≠转换、`erasableSyntaxOnly`（实测 TS1294 拦住 enum）、`import type`、`package.json#imports`（实测 Node 18 可解析）、ESM 无真热更 ⇒ 热更是 Python 独家\n- **§5 RPC 类型**：方法名字面量双向绑定 + `tsc -p .` exit 0 作为可执行断言，并诚实标出双层泛型索引需要 conditional helper 这个摩擦点\n- **§6 与 abelkhan/§8 对齐**：明确 §8 的前提已断（客户端不再是 .NET 引擎），§8 降为条件命题；只可复��拓扑形状不能复用代码；并记下本栈在\\\"加 UDP 通道\\\"上相对 LGPL 陷阱的真实优势\n- **§7 十条未核实**（双协议 flatbuffer/protobuf 零实测被列为第一条）**§8 五个带判据的 spike**\n\n范围漂移：为让 §3/§4 的数字站得住，同步在 `spikes/` 下补了 `ts-runtime/erasable-syntax/`、`ts-runtime/imports-field/` 两个小 demo（本轮实测后才敢写【实测-本机】）。",
+          "verification": "- 文档内 12 个相对链接 + spikes/README 的 3 个目录链接 → 全部存在（脚本逐条校验）\n- `npx -p typescript@5.9 tsc -p spikes/rpc-typing` → exit 0\n- `npx -p typescript@5.9 tsc -p spikes/ts-runtime/erasable-syntax` → exit 2 + TS1294（故意失败）\n- `node spikes/ts-runtime/imports-field/app.mjs` → imports-field-ok\n- `npx tsx t.ts` → tsx-ok 42；`node --experimental-strip-types` → bad option（据此把 tsx/擦除两行的证据等级标准）",
+          "commitSubject": "docs: 新增服务器引擎技术栈决策文档",
+          "artifacts": [
+            {
+              "kind": "change",
+              "path": "docs/server-engine-stack.md"
+            }
+          ]
+        },
+        {
+          "id": "t_747a8a4a2eb7",
+          "title": "更新 README 的文档数量、结构与状态",
+          "status": "done",
+          "origin": "agent",
+          "createdAt": "2026-11-19T09:45:42.380Z",
+          "updatedAt": "2026-11-19T09:51:09.073Z",
+          "note": "五份→六份；补\"首次有实测\"这一条状态变更",
+          "summary": "README 从\\\"五份文档、无代码\\\"改成\\\"六份文档 + `spikes/`\\\"，并新增一节 `### 唯一的例外：spikes/`：\n\n- 核心文档列表补上 `server-engine-stack.md` 一行（带关键数字：79× / 130× / 7× / 5.2× / 3.55×，以及\\\"§8 的前提已被改写\\\"的指向）\n- 状态段落原本写\\\"无代码、无构建、无可运行产物\\\"——现在改为\\\"**除 `spikes/` 之外**无代码\\\"，并明确这是本仓库第一次破例的原因（文档里的判断需要可复现的数字）\n- 新增四条断言表（ts-vs-python / ts-runtime / rpc-typing / 两条工具链断言），每条只写结果，不写推论\n- 紧跟一段⚠️划清边界：这四条只证明它们自己那一件事，**不是**\\\"一台机器能扛多少玩家\\\"的证据\n- 结尾\\\"下一阶段的建议\\\"补上 server-engine-stack §8 的 S1/S2\n\n刻意没动的地方：README 里\\\"`mmorpg-verification-plan.md` 中的**三个**实验\\\"这句与文档实际的**四个**实验不一致——这是既有笔误，不属于本步骤的范围，留在那里并在此声明。",
+          "verification": "- README 内 6 个相对链接 → 全部存在（脚本校验，含 `spikes/` 目录）\n- 三处文本编辑后重读 1–29 行与 60–95 行 → 顺序与措辞连贯，无残留\\\"五份文档\\\"",
+          "commitSubject": "docs: 标注引擎选型文档 §5/§7/§8 的前提已变"
+        },
+        {
+          "id": "t_b43337baeee4",
+          "title": "在 mmorpg-engine-choice.md §8 加交叉引用并核对链接",
+          "status": "done",
+          "origin": "agent",
+          "createdAt": "2026-11-19T09:45:42.380Z",
+          "updatedAt": "2026-11-19T09:51:12.749Z",
+          "note": "abelkhan(C# gate+protobuf) vs 本次 Go gate 的关系要说清，不能让两份文档互相矛盾",
+          "summary": "在 `mmorpg-engine-choice.md` 加两处警示，把\\\"两份文档互相矛盾\\\"变成一个明确的**条件命题**：\n\n- 头部状态行 + 一段 ⚠️：说明 §5 的建议、§7、§8 共同建立在\\\"客户端从 Stride/Godot/Unity 中选、团队与服务端是 C#\\\"之上；这个前提已被 `server-engine-stack.md` 改掉（Cocos(TS) 一等目标 + TS `core` + Go gate）。明确\\\"这两条路互斥\\\"，并指出 §1–§4 的四缺口对照与\\\"权威内核不建在引擎里\\\"不受影响\n- §8 标题下再放一条短警示：说明 §8.1/§8.2 的核实结论仍被新文档引用，§8.3 的引擎判定只在\\\"决定复用 abelkhan 服务端\\\"时生效\n\n决策记录（为什么不直接改结论）：§8 里 abelkhan 的一手核实（LGPL-2.1、只有 TCP/WebSocket、`client/` 只有 csharp）仍然是本仓库最硬的一批证据，删掉就是丢证据；改成条件命题既不丢证据，也不让读者按旧前提去做事。\n\n范围：只动 `mmorpg-engine-choice.md` 的头部与 §8 前言，正文一个字未改；没有把同样的警示铺到 `mmorpg-verification-plan.md`（它的四个实验在新栈下的取舍属于另一个任务）。",
+          "verification": "- 链接校验脚本（按 `#fragment` 切分后逐条 stat）→ `docs/mmorpg-engine-choice.md` all links ok\n- 重读 1–12 行与 190–200 行 → blockquote 连行完整、§8 标题下警示位置正确",
+          "commitSubject": "docs: 交叉引用服务端技术栈与 abelkhan 评估"
+        }
+      ]
+    }
+  ],
+  "summary": "## Summary\n\n回答\"protobuf TS 用哪个库\"，并把三个凭记忆不该下的判断全跑成了实测：**`erasableSyntaxOnly` 兼容性、读写性能、客户端包体**。结论是 **`@bufbuild/protobuf` v2（protobuf-es）**，但带两条反直觉的修正。\n\n四条实质结论：\n\n1. **protobuf-es 兼容 `core` 的\"零编译步骤\"约束**：生成的 `state_pb.ts` 是 type-only interface + `MessageSchema` 常量，无 `enum`/`class`/`namespace`；`tsc --erasableSyntaxOnly --verbatimModuleSyntax --strict` → **exit 0**。但这条判据**不区分**两个库——protobufjs 的 `pbts` 声明也能过（ambient namespace 合法）；protobufjs 真正的冲突是它的**运行时是 CommonJS**（必须 `createRequire` 才能进 ESM）。\n2. **protobuf-es 并不普遍更快**：AoS（1000 个小 message）encode 1416–1462 µs / read 846–876 µs，**比 protobufjs 慢 1.5×**（747–761 / 586–589）——因为它把每个 message 的默认字段都填满；只有 packed 标量数组快 **2.7×**（read 176–181 vs 484–498）。所以\"换新库买性能\"在 AoS 路径上不成立。\n3. **包体是客户端的主要代价**：protobuf-es 100.5 KB min / **27.7 KB gzip**，protobufjs 70.6 / 16.0，**flatbuffers 23.6 / 4.1**。对 Cocos/小游戏，为状态同步引入任何 protobuf 库都不划算。\n4. **三种实现字节流完全一致**（50433 / 34006）：protoc-gen-go、protobufjs、protobuf-es 产出同一个 wire format——这既是这次的验收条件，也说明\"换库\"不会悄悄改变线上协议。\n\n落地结论已写进文档：**服务端/RPC/落库 → protobuf-es v2**（bigint 原生、纯 ESM、零 `Long` 坑）；**客户端状态同步 → FlatBuffers**（4.1 KB gzip、104 µs/1000 实体），只为中低频 RPC 才引 protobuf-es 并认 +11.7 KB gzip；**protobufjs 只在\"必须运行时动态加载 `.proto`\"时留用**。\n\n## Changes\n\n- **`docs/server-engine-stack.md`**：新增 **§8.3「TS 侧到底用哪个 protobuf 库」**（三条判据对照 + 性能表 + 反直觉解释 + 三条结论 + Windows codegen 坑）；§4 加一条交叉引用（\"三种方式消费\"这条要求会传导到库选择上）；§8.2 里 protobuf 那两行改名为 `protobufjs` 以免混淆。\n- **`spikes/ser-compare/`**：\n  - `gen-es.mjs` —— **绕过 Windows 上\"protoc/buf 要求插件是可执行文件而 npm 只给 .cmd\"** 的问题：protoc 只出 `FileDescriptorSet`，自己构造 `CodeGeneratorRequest` 喂插件 stdin、读回 `CodeGeneratorResponse` 写文件。\n  - `es-entry.ts` + `es-check/tsconfig.json` —— protobuf-es 的打包入口与 erasable 断言。\n  - `bench-ts.mjs` 加 protobuf-es AoS/SoA 两个变体（原生 bigint，无需 protobufjs 那套 string 转换）。\n  - `build.sh` 补上 `gen-es.mjs`、`pbes.mjs` 与三份包体产物；`README.md` 补 protobuf-es 小节、验证命令、codegen 坑。\n- **`spikes/README.md` / 根 `README.md`**：断言表与段落同步三条结果。\n- **清掉了失败尝试的残留**：`buf.yaml` / `buf.gen.yaml`（buf 同样无法调用 .cmd 插件）、`es-check-pbjs/`（结论已写进文档，但目录无法被 `build.sh` 重放）。\n- 依赖新增 `@bufbuild/protobuf@2`、`@bufbuild/protoc-gen-es@2`、`@bufbuild/buf@1`（后者最终没用于生成，仅在排查中试过）。\n\n## Testing\n\n- `node spikes/ser-compare/gen-es.mjs` → 写出 `gen/es/state_pb.ts`（7,049 bytes）；`grep \"enum |class |namespace\"` → 无匹配\n- `npx -p typescript@5.9 tsc -p spikes/ser-compare/es-check` → **exit 0**（erasable + verbatim + strict）\n- `node spikes/ser-compare/bench-ts.mjs 1000 200` ×3 → 六组变体全部出数，轮间 < 3%，bytes 列与 Go 侧逐行一致\n- `esbuild --bundle --minify` + zlib level 9 → 100.5/27.7 KB、70.6/16.0 KB、23.6/4.1 KB\n- `bash -n build.sh` → 语法 ok；清空 `gen/` 后全链路重建成功\n- 链接校验（4 个 markdown）→ 全部存在；`git status -uall` → 无 `gen/`、`node_modules/`、`*.exe`、`state.pb.go` 漏进仓库"
+}
