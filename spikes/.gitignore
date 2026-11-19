@@ -1,0 +1,8 @@
+# Cython / setuptools 产物
+build/
+*.pyd
+*.c
+*.obj
+*.exp
+*.lib
+node_modules/
