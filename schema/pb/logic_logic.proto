@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-// logic ⇄ logic 的**内部**协议：节点发现、实体迁移、跨实体调用。
+// logic ⇄ logic 的**内部**协议：实体迁移、跨实体调用、频道广播。
 //
 // 对照 abelkhan：它的 hub_hub.proto 是这一层（hub 之间）。
 //
@@ -8,45 +8,19 @@ syntax = "proto3";
 //   1. 跨节点调用只**转发**，不在中转节点上执行业务逻辑。
 //   2. 实体迁移必须由**原节点**发起并完成落库，之后新节点才是权威（"内核是唯一写者"）。
 //   3. 这里不出现任何业务语义；业务消息一律以不透明字节透传。
+//   4. **方法名不在 schema 里**：调用方给 "cluster.transfer.prepare" 这类字符串，
+//      消息只描述形状（与客户端协议、gate 层同一套规则）。
+//   5. **服务发现、注册、健康检查、负载上报全部交给 consul**：本文件里**没有**节点注册、
+//      心跳、上线/下线通知——对端地址从 consul 查，节点死掉由 consul 的健康检查摘掉，
+//      "连不上"就重连。少一套自研发现协议，就少一处会和 consul 打架的真相。
+//   6. **"逻辑层决定的字节"一律叫 `content`**（原 state / body / payload 已统一），
+//      与客户端协议的 `CallEntity.content` 同名同义：框架不解释它。
 
 package fw;
 
 import "common.proto";
 
 option go_package = "meter/schema/pb;pb";
-
-// 节点自述：启动时向注册中心/对等节点广播一次。
-message NodeDesc {
-  string node_id = 1;
-  string addr = 2;                 // host:port（内部链路，不走公网）
-  repeated string roles = 3;       // "logic" / "scene" / "social" …
-  uint32 capacity_sessions = 4;    // 设计容量，用于负载均摊
-  string zone = 5;                 // 区/服标识
-}
-
-// 注册（method = 0x0C01）
-message RegisterRequest {
-  NodeDesc node = 1;
-  uint32 proto_ver = 2;
-}
-message RegisterResponse {
-  ErrorCode error = 1;
-  repeated NodeDesc peers = 2;     // 已知的对等节点（全量或增量由实现决定）
-}
-
-// 心跳（method = 0x0C02）。超过 N 个周期没心跳即视为下线。
-message NodeHeartbeat {
-  string node_id = 1;
-  uint32 sessions = 2;
-  uint32 tick_lag_ms = 3;
-  bool accepting = 4;
-}
-
-// 节点下线（MSG_NOTIFY，method = 0x0C03）
-message NodeGone {
-  string node_id = 1;
-  string reason = 2;
-}
 
 // ---------------------------------------------------------------------------
 // 实体迁移
@@ -60,7 +34,7 @@ message NodeGone {
 //   ⑤ gate 侧用 SessionRebind 更新路由
 
 message TransferPrepareRequest {
-  uint64 entity_id = 1;
+  string entity_id = 1;
   string from_node = 2;
   string to_node = 3;
   uint32 proto_ver = 4;
@@ -71,9 +45,9 @@ message TransferPrepareResponse {
 }
 
 message TransferCommitRequest {
-  uint64 entity_id = 1;
-  bytes  state = 2;                // 该实体的最终状态（不透明字节，由逻辑层自定）
-  uint64 version = 3;              // 与存储层对齐的版本号（见 logic_dbproxy.proto）
+  string entity_id = 1;
+  bytes  content = 2;              // 该实体的最终状态（逻辑层决定的不透明字节）
+  uint64 version = 3;              // 与 hub 存储模块对齐的版本号（乐观锁）
   uint64 handoff_time_ms = 4;
 }
 message TransferCommitResponse {
@@ -88,10 +62,12 @@ message TransferCommitResponse {
 // 客户端只能操作"自己的"实体；服务端内部则经常需要"让 A 去处理 B"（组队、交易、战斗协战）。
 // 这类调用统一走这里，而不是让各业务自己写一套转发。
 
+// 跨实体调用：目标节点按 `dst_entity` 找到本地实体，再用 `method` + `content` 执行。
+// （没有内部封套，所以路由信息必须显式写在这条消息里。）
 message CrossCallRequest {
-  uint64 dst_entity = 1;
-  uint32 method = 2;               // 业务域的方法码（≥0x1000），由目标节点自身分发
-  bytes  body = 3;                 // 目标方法的请求体
+  string dst_entity = 1;
+  string method = 2;               // 目标方法名（由目标节点自身分发）
+  bytes  content = 3;              // 目标方法的请求体（逻辑层决定的不透明字节）
   string trace_id = 4;
 }
 message CrossCallResponse {
@@ -108,8 +84,8 @@ message CrossCallResponse {
 
 message ChannelPublish {
   string channel = 1;              // "scene:1001" / "world:notice" …
-  bytes  payload = 2;              // 对订阅者原样下发
-  bool   exclude_sender = 3;
+  bytes  content = 2;              // 对订阅者原样下发（逻辑层决定的不透明字节）
+  bool   exclude_source = 3;       // 命名与 CallGlobal.exclude_source 保持一致
 }
 message ChannelPublishAck {
   ErrorCode error = 1;

@@ -210,7 +210,7 @@
 | README 自述 | 轻量级游戏服务器框架，C# 开发，**MongoDB** 存储，基于 **consul** 服务发现，**protobuf** 序列化，**dbproxy + gate 网关 + hub 微服务**架构 | 【一手】 |
 | 结构 | `core/`（RPC/网络）、`engine/`（`WRpc.cs`、`Result.cs`）、`gate/`、`hub/`、`proto/`、`client/csharp/`、`dependences/{linux,windows}/`＝**consul + redis** | 【一手】 |
 | **客户端绑定** | **只有 C#**：`client/csharp/Client.cs`(81 KB) + `Common.cs`(51 KB)，无引擎专用文件 | 【一手】 |
-| 协议层 | `proto/` 下是 **protobuf**（`client.proto`/`common.proto`/`gate_client.proto`/`hub_gate.proto`/`hub_hub.proto`）+ `codegen.bat`/`codegen.sh` | 【一手】 |
+| 协议层 | `proto/` 下共 **16 个文件**：框架面 `common`/`client`/`gate_client`/`hub_gate`/`gate_hub`/`hub_hub`，业务面 `bag`/`mail`/`shop`/`leaderboard`/`friend`/`chat`/`guild`/`quest`，加 `codegen.bat`/`codegen.sh`（**只有 `--csharp_out`，无任何 rpc 插件**）。线上协议本体是 `common.proto` 的 `Msg{oneof Request/Response/Notify/HeartBeats}` + `CallRpc{string proto_name, bytes content}`；**全仓没有 `service` 定义** | 【一手：2026-11 抓取原文】 |
 | **传输层** | **只有 TCP 与 WebSocket**：`core/` 下是 `TcpNetwork`/`TcpAcceptService`/`TcpConnectService`、`WebSocketNetwork`/`WebSocketAcceptService`/`WebSocketConnectService`。**没有 UDP / KCP / ENet** | 【一手（否定性）】 |
 | 未核实 | `core.csproj` 的目标框架；`Client.cs` 内部是否依赖 AOT 不友好的反射；是否有 UDP 路线图；生产案例（社区证据为零） | 【未核实】 |
 | 不一致 | README 写"支持 C# 和 **TypeScript** 前端"，但仓库 `client/` 下**只有 csharp** | 【一手】 |

@@ -63,7 +63,7 @@
 
 ## 状态
 
-设计提案（design proposal）。**代码只有两处**：`spikes/`（可复现的基准与探针）与 `schema/`（框架协议 + codegen 校验，见下）。没有可运行的服务端。
+设计提案（design proposal）。**代码只有四处**：`spikes/`（可复现的基准与探针）、`schema/`（框架协议 + codegen 校验）、`core/`（逻辑层运行时骨架：8 字节帧头 + RPC 三函数，10 条测试）、`gate/`（接入层 Go 骨架：帧头 + 会话表 + 分派，能起、能回包）。**还没有可用的服务端**——逻辑层转发、WebSocket、压缩都没接。
 
 `docs/mmorpg-verification-plan.md` 中的三个实验**均未执行**——本次会话的 shell（pwsh）不可用（每次调用以 `0xC0000142` / DLL 初始化失败退出），因此没有编译、没有运行、没有测量。该文档是**待执行的协议**，不是实测报告。
 
@@ -80,10 +80,34 @@
 差别有两条写在该目录的 README 里：类型放 payload（不进帧头）、帧头与传输解耦。
 
 ```bash
-cd schema && ./check.sh     # protoc + protoc-gen-go + protoc-gen-es + methods.yaml → 常量，再跑 14 条结构断言
+cd schema && ./check.sh     # protoc + protoc-gen-go + protoc-gen-es，再跑 11 条结构断言
 ```
 
-`schema/methods.yaml` 是 method code 的唯一分配表（本期只登记框架面 `0x00xx–0x0Cxx`）；`msg_type` 的权威定义是 `envelope.proto` 里的 `MsgType` enum。
+`.proto` 只描述消息（**没有 `service`**）：方法名由调用方给，类型绑定在业务侧的 `RpcMap`；`msg_type` 的权威定义是 `envelope.proto` 里的 `MsgType` enum。
+
+### `core/`：逻辑层运行时骨架
+
+`docs/protocol-map.md` 里定的两条硬规格已经落成代码，`npm test` 10 条全过：
+
+- **8 字节帧头**（`flags:zstd | len:u24 | ts:u32`）：编解码、半包、未知 flag 抛错、`ts` 跨 32 位回绕与异常时钟 clamp
+- **RPC 三函数**：`callEntity(method, reqBytes, RspSchema)` / `callGroup(method, reqBytes)` / `register(method, ReqSchema, RspSchema, handler)` —— 信封装配、`callback_id` 配对、超时、未知方法丢弃+计数
+
+```bash
+cd schema && ./check.sh    # codegen → core/src/gen/（已 gitignore）
+cd ../core && npm install && npm test
+```
+
+### `gate/`：接入层骨架（Go）
+
+```bash
+cd schema && ./check.sh      # codegen → gate/internal/pb 与 core/src/gen
+cd ../gate && go build ./... && go test ./... && go run ./cmd/gate -listen :9001
+```
+
+- **8 字节帧头**与 `core/src/frame.ts` **逐字节一致**（`golden_test.go` 里钉了黄金向量）
+- **会话表**：`conn → (user, entity, node)` 与 `entity → conn` 双向；同实体被新连接绑走时返回旧会话由 gate 踢掉
+- **分派骨架**：`client.login`（占位实现）、其它 REQUEST 回 `NOT_FOUND`、`len==0` 当 ping
+- 已冒烟：Python 手工造帧 → 真实 TCP → 收到 `LoginResult` 回包
 
 ### 另一处例外：`spikes/`
 

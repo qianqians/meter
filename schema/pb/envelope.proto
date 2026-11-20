@@ -1,17 +1,18 @@
 syntax = "proto3";
 
-// RPC 信封：**每一帧 payload 的唯一形状**（帧头 4 字节在外层，不是 proto）。
+// 帧载荷的最外层结构（**已定**）：每一帧的 payload 就是一个 `Envelope`，**只有这一层**。
 //
-// 设计依据见 docs/protocol-map.md §4.5：
-//   · 帧头只做纯传输分帧（压缩位 + 长度），不带类型/路由/序号
-//   · 路由靠 gate 的会话表（连接 → entity → 逻辑节点）
-//   · 类型靠这里的 method code（整数，不是字符串）
-//   · 请求-响应配对靠 callback_id
+//   Envelope{ msg_type, method, callback_id, status, body = <具体消息> }
+//   body ∈ NotifyConnID / LoginResult / CreateEntity / CallEntity / CallGlobal …
 //
-// 为什么 msg_type 用 uint32 而不是 proto enum：protoc-gen-es 会把 proto enum
-// 生成为真正的 TS `enum`，而 core 开了 erasableSyntaxOnly 会直接 TS1294 编不过
-// （实测见 docs/protocol-map.md §4.6.1）。这里是框架内部标签，取值语义由本文档定义。
-
+// `CallEntity.content` / `CallGlobal.content` 里放的是**逻辑层决定的那条 protobuf 消息的序列化字节**：
+// 框架不解释它（gate 连类型都不知道），类型由**本消息的 `method`** 决定。
+// 也就是说 method / callback_id / status 只在最外层出现一次，不存在嵌套的信封。
+//
+// **没有内部封套**：跨进程的路由信息（源/目的节点、目的实体、trace）由各条内部消息
+// 自己的字段表达（`CallEntity.entity_id`、`GateForwardHubCallClient.conn_id`、
+// `CrossCallRequest.dst_entity`…），不再额外包一层 `InternalEnvelope`。
+//
 package fw;
 
 option go_package = "meter/schema/pb;pb";
@@ -36,8 +37,15 @@ message Envelope {
   // 消息类型。用 enum 而不是 uint32（理由见文件头）。
   MsgType msg_type = 1;
 
-  // 方法码，见 schema/methods.yaml（框架面已分配 0x00xx–0x0Cxx，功能域从 0x10xx 起）。
-  uint32 method = 2;
+  // 方法名，形如 "fw.ClientGate/Auth"（= 完整服务名/方法名，gRPC 风格）。
+  //
+  // 为什么是字符串而不是数字码：
+  //   · **唯一源**是 .proto 里的 `service` 定义——protoc 会校验 req/rsp 类型真的存在，
+  //     而"另写一张 method 码表"无法校验，改名 message 时它只会静默过时（我们确实踩到过）。
+  //   · 抓包/日志直接可读，排障不用查表。
+  //   · 代价 ~20 字节/帧：在 1.9 KB 的状态包上是 1%，在小 RPC 上约 15%。
+  //   · 服务端分发可以自行 intern 成内部整数（进程内缓存），但**线上**保持字符串。
+  string method = 2;
 
   // 请求-响应配对：
   //   REQUEST  → 发送方填（>0，连接内单调递增，在途期间不复用）
@@ -52,41 +60,6 @@ message Envelope {
   bytes body = 4;
 
   // 6–15 保留：trace id、灰度标签、压缩后的 body……一律通过新增字段扩展，
-  // 永远不要再往 4 字节帧头里加东西。
-  reserved 6 to 15;
-}
-
-// 内部链路（gate ⇄ logic / logic ⇄ dbproxy / logic ⇄ logic）共用的外层。
-//
-// 为什么单独一层而不是给 Envelope 加字段：Envelope 是**客户端可见**的形状，
-// 任何客户端可控的字段都不该参与服务端路由；路由信息放在这里，客户端碰不到。
-message InternalEnvelope {
-  // 发起的节点（日志/链路追踪用；不参与路由决策）。
-  string src_node = 1;
-
-  // 本条消息的目的节点；空表示"由接收方按 dst_entity 自行查找"。
-  string dst_node = 2;
-
-  // 目的实体（仅 logic ⇄ logic 的跨实体调用需要）。
-  uint64 dst_entity = 3;
-
-  // 链路追踪 id（可空）。框架只负责透传，不解析。
-  string trace_id = 4;
-
-  // 被搬运的信封。可能是客户端的 Envelope 字节（gate 透传上行），
-  // 也可能是服务端自己生成的 InternalPayload。
-  bytes payload = 5;
-
-  reserved 6 to 15;
-}
-
-// 内部链路的负载（放在 InternalEnvelope.payload 里）。
-// 与 Envelope 同构，但带内部才有的调用方/被调用方语义。
-message InternalPayload {
-  uint32 msg_type = 1;      // 同 MSG_* 取值
-  uint32 method = 2;        // 见 schema/methods.yaml 的 0x0A/0x0B/0x0C 段
-  uint32 callback_id = 3;
-  uint32 status = 4;
-  bytes body = 5;
+  // 永远不要再往 8 字节帧头里加东西。
   reserved 6 to 15;
 }

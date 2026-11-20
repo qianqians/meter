@@ -1,0 +1,3 @@
+gate.exe
+# codegen 产物（cd schema && ./check.sh 生成）
+internal/pb/

@@ -54,7 +54,7 @@
 flowchart LR
   C["Cocos 客户端（TS）"] <-->|"L1 · 长连接<br/>protobuf（SoA 热 / AoS 冷）<br/>8 B 帧头"| G["gate（Go）<br/>只读 8 字节，透传 payload"]
   G <-->|"L3 · 内部<br/>pb 控制面 + 透传数据面"| K["core（TS）<br/>逻辑/战斗/AOI"]
-  K <-->|"L4 · pb + zstd"| D["dbproxy（Go）"]
+  K <-->|"L4 · 直连（hub 内存储模块）"| D["DB / 缓存"]
   K <-->|"L5 · pb"| K2["其他 scene / hub"]
   D <-->|"pb blob"| DB[("DB / Redis")]
   M["GM / 监控 / 后台"] -->|"L6 · HTTP + JSON"| K
@@ -65,7 +65,7 @@ flowchart LR
 | **L1** client ⇄ gate ⇄ logic | **protobuf**（热路径 SoA、冷路径 AoS），帧头 8 字节 | 一种格式 = 一套 schema、一套 codegen、一套调试工具；路由靠 gate 的会话表，不靠帧头 |
 | **L2** logic → gate → client 推送 | 同一通道，**字节透传** | gate 不解码，转发成本 = memcpy |
 | **L3** gate ⇄ logic | 控制面 pb；数据面**透传** | gate 若解码状态包，零分配设计就废了 |
-| **L4** logic ⇄ dbproxy ⇄ DB | **pb**，大对象再 zstd | 低频、要可读、要能与运维工具共用 |
+| **L4** logic(hub) ⇄ DB | **无独立进程**：hub 内的存储模块直连（驱动 + 版本 CAS + 批量） | 去掉一层进程 = 少一跳、少一套部署。存档仍是 pb 字节 + `schema_version` |
 | **L5** logic ↔ logic | **pb** | 低频、要能 debug；读方不是渲染层，不需要零拷贝 |
 | **L6** 运维面 | **HTTP + JSON**（pb 的 `toJson`） | 不引入第三套协议 |
 | **L7** 落库 / 日志 / 回放 | pb blob / JSON / **pb + 帧头** | 回放按帧重发原字节，零转码 |
@@ -168,10 +168,12 @@ off  size  field
 三处取舍：
 
 - **`len` 保持 u24**：省掉"64 KB 就得切块"的隐含约束；也不到 u32 的 4 GB（那是内存放大攻击的入口）。加上 ts 之后总长刚好 8 字节，不需要为了对齐牺牲 `len` 宽度。
-- **`ts` 用 u32 而不是 u16/u48**：u16（毫秒，65.5 s 回绕）省 2 字节但会把帧头变成 7 字节（破坏对齐）；u48 是 3 字节且没有硬件友好的读法；u32 毫秒回绕周期 **49.7 天**，且能用"有符号差值"一次性处理回绕（见 4.3）。
+- **`ts` 保留，用 u32 而不是 u16/u48**：u16（毫秒，65.5 s 回绕）省 2 字节但会把帧头变成 7 字节（破坏对齐）；u48 是 3 字节且没有硬件友好的读法；u32 毫秒回绕周期 **49.7 天**，且能用"有符号差值"一次性处理回绕（见 4.3）。
 - **比特序固定**：bit0 压缩、其余必须 0，未知位 → 断开（理由见 4.5）。
 
 ### 4.3 `ts` 的语义：单调钟、逐跳覆盖、只做诊断
+
+> **已定：保留。** 代价 4 B/帧（`MoveBatch` 1.5 KB 上是 0.53%，每连接 20 Hz 约 +80 B/s）；换来的是**每一帧都能算该跳的单向延迟**——排障（"是客户端慢还是链路慢"）、后端指标（每跳延迟分布）、战斗回放（按时间轴对齐）都靠它，而且这些场景**事后补不了**。若将来某条链路真的受带宽限制，再按消息族关掉（帧头留一个 flag 位即可）。
 
 这个字段最容易用错，所以把语义写死：
 
@@ -209,12 +211,31 @@ off  size  field
 
 ### 4.6 语义都在这里：RPC 信封
 
-`Envelope` 是**每条帧 payload 的唯一形状**。下面是经实测校过的版本（`spikes/ser-compare/schema/envelope.proto` + `envelope-check.mjs`）：
+**层次（已定）**：
+
+```
+帧头（二进制）   flags:zstd | len:包长 | ts:单调毫秒
+└─ Envelope      ← 最外层，且**只有这一层**
+     msg_type / method / callback_id / status
+     body ∈ NotifyConnID | LoginResult | CreateEntity | CallEntity | CallGlobal …
+       └─ CallEntity{entity_id, content}          单播（两个方向共用，定义在 common.proto）
+          CallGlobal{content, exclude_source}      广播（全体在线连接，仅服务端 → 客户端）
+          ※ 组播 CallGroup 属于内部协议（hub → gate），不在客户端协议里
+          content = **逻辑层决定的那条 protobuf 消息的序列化字节**（框架不解释、连类型都不知道）
+```
+
+**两条分工要记牢：**
+
+- **`method` / `callback_id` / `status` 只在最外层出现一次**——不存在嵌套的信封，也就不存在"看哪个 callback_id"的歧义（原 §11 第 3 条因此自动消失）。
+- **`content` 的类型不由框架决定，而由 `method` 决定**：客户端用 `RpcMap`（`method → 消息类型`）查，服务端用逻辑层的分发表查。gate 只读 `CallEntity.entity_id`（`CallGlobal` 不需要读任何字段），**永不触碰 `content`**。
+下行直接投递；上行只做**登录态 / 限流 / 格式 / 路由**，**不做**"只能调自己"的校验——怪、NPC、宠物都是实体，客户端本来就要调它们，鉴权在逻辑层。
+
+下面是 `Envelope` 本体，经实测校过的版本（`spikes/ser-compare/schema/envelope.proto` + `envelope-check.mjs`）：
 
 ```proto
 message Envelope {
   MsgType msg_type   = 1;   // enum：REQUEST / RESPONSE / NOTIFY（0=未设置，收到即丢）
-  uint32 method      = 2;   // method code（整数，不是字符串）
+  string method      = 2;   // "client.auth" —— 方法名由调用方定义，schema 不约束
   uint32 callback_id = 3;   // Request 填（>0）；Response 原样回填；Notify 填 0
   uint32 status      = 5;   // 仅 Response：0=ok，非 0=错误码
   bytes  body        = 4;   // 具体消息的 protobuf 编码
@@ -222,15 +243,18 @@ message Envelope {
 }
 ```
 
-**【实测-本机】每种消息的线上开销（body = 100 字节时）：**
+**【实测-本机】每种消息的线上开销（body = 100 字节时，method = `"client.auth"`）：**
 
 | 消息 | 总字节 | 信封开销 | 说明 |
 |---|---:|---:|---|
-| `Request` | 109 | **9 B** | msg_type 2 + method 3 + callback_id 2 + body 头 2 |
-| `Response`（ok） | 109 | 9 B | **`status=0` 完全不占字节**（与显式写 0 的字节流完全相同） |
-| `Response`（status=403） | 112 | 12 B | 错误只贵 **3 B** |
-| `Notify` | 107 | 7 B | `callback_id=0` 被省略（省 2 B） |
-| `msg_type=0`（None） | 105 | 5 B | `msg_type=0` 也被省略（再省 2 B） |
+| `Request` | 119 | **19 B** | msg_type 2 + **method 13**（11 字节名 + 长度前缀）+ callback_id 2 + body 头 2 |
+| `Response`（ok） | 119 | 19 B | **`status=0` 完全不占字节** |
+| `Response`（status=6） | 121 | 21 B | 错误只贵 **2 B** |
+| `Notify` | 119 | 19 B | method = `"client.kicked"`（13 B 名）；`callback_id=0` 被省略 |
+
+> **方法名多长就多贵**：`"client.auth"`（11 B）时信封 19 B，换成 `"fw.ClientGate/Auth"`（18 B）就是 26 B。
+> 在 1.9 KB 的状态包上 ~1%，在小 RPC（~100 B body）上 ~15–20%。
+> 所以方法名长度是个**可调的预算项**：域.动作式的短名（`client.auth`）够用就别写全限定名。
 
 **四条由此确定的规矩：**
 
@@ -241,7 +265,7 @@ message Envelope {
 
 #### 4.6.1 枚举：**可以直接用**（这一条已改口，记录在此）
 
-**结论：用 proto enum。** `Envelope.msg_type` 是 `MsgType` enum，由 schema 生成 TS/Go 常量；`methods.yaml` 只负责 method code，不再镜像 msg_type。
+**结论：用 proto enum。** `Envelope.msg_type` 是 `MsgType` enum，由 schema 生成 TS/Go 常量。
 
 **为什么改**：`erasableSyntaxOnly` 这个约束的存在理由，是"`node --experimental-strip-types` 只能擦除不能转换"。而本工程的运行时是 **Cocos（客户端）** 与 **Bun（服务端逻辑层）**——两边都能直接执行/编译 TS `enum`。也就是说那条约束**换不到任何东西**，却让我们放弃类型检查、放弃穷尽 `switch`、把枚举语义退化成 `.proto` 里的一段注释。**约束被主动放弃，枚举回归。**
 
@@ -253,16 +277,59 @@ gen/esenv/envelope_pb.ts(55,13): error TS1294: This syntax is not allowed when '
 
 留着它不是为了复现问题，而是为了回答"如果哪天又有人想要零构建直跑，代价是什么"——代价就是不能写枚举/装饰器/参数属性。
 
-**替代"禁止 enum"的三条护栏**（现在是 `schema/check.sh` 的第 12–14 条断言）：
+**替代"禁止 enum"的三条护栏**（现在是 `schema/check.sh` 的第 10–11 条断言 + 代码评审）：
 
 1. **`MsgType` 必须由 schema 生成**，不许手写一份常量文件（一份权威定义 > 两份镜像）。
 2. **proto3 的枚举是开放的**：不认识的值会被原样保留为数字、不会报错。所以接收端必须有 `default → 丢弃 + 计数`，绝不猜。（这条与 §4.5-3"未知 msgId 丢弃"是同一个纪律。）
 3. **`ErrorCode.code` 保持 `int32` 而不是 enum**——错误码空间是开放的（业务域从 1000 起自行分配），框架既枚举不完也不该枚举。这两个字段的取舍不同，理由也不同。
 
+#### 4.6.2 协议层**不做**"取消在途请求"（已决策）
+
+曾经考虑过一条 `CancelCall{callback_id}`，最终否掉。理由不是"省一条消息"，而是**它在链路上天然迟到**：
+
+- 一条连接是**有序**的（TCP / WebSocket），`CancelCall` 必然排在它要取消的请求**后面**；
+- 服务端大多**同步**处理请求，或者按到达顺序串行处理一个实体的请求——等 gate 转发到 `CancelCall` 时，前面那条早就执行完了；
+- 所以能"取消成功"的窗口极窄：只有"请求排队未开始"的那一小段。为这段窗口加一个协议原语，**换来的是一个新的攻击面**（客户端可以定向 cancel 洪水，让服务端反复构建/丢弃任务）。
+
+**取消在正确的位置上是"业务方法"，不是协议原语。** 需要取消语义的场景（取消匹配、取消读条、取消寻路）本身就是有状态的长流程，它们各自带 `operation_id`：
+
+```proto
+message CancelMatch { uint64 operation_id = 1; }   // 一个普通的业务方法
+```
+
+服务端按 `operation_id` 判断"这个操作还在不在"，这比在 RPC 层取消**准确得多**——因为业务知道自己在做什么，协议层不知道。
+
+**删掉协议层取消之后，真正要补的是这三件（都在客户端/业务侧，不在 schema）：**
+
+| # | 要求 | 为什么 |
+|---|---|---|
+| 1 | **迟到的响应按 `callback_id` 丢弃** | 客户端本地放弃某个请求后，响应仍会回来。丢弃表要有上限与过期，否则是内存泄漏 |
+| 2 | **超时由客户端定时器负责，服务端仍会执行** | 客户端超时 ≠ 服务端不执行。所以"看起来失败、其实成功了"是常态，UI 必须按最终状态刷新，不能按响应推断 |
+| 3 | **有副作用的请求要有业务幂等键** | 没有取消 ⇒ 客户端重试（或用户重连后补发）必然出现重复执行。幂等键是业务字段（如 `client_op_seq`），不是协议层的东西 |
+
 ### 4.7 这个设计带来的三个必答题
 
 1. **`req_id` 必须有。** `callEntity<rsp>` 返回 Promise ⇒ 同一连接上必然有多个请求在途（打开一个面板就要发 3 个查询）。靠"严格 FIFO 响应"在超时与乱序面前排障会非常痛苦。→ 放信封字段 1。
-2. **`method` 必须是整数。** 20 Hz × 4000 连接 = 8 万包/秒起步，每包做一次字符串比较不可接受；而且每包带 10–20 字节的方法名，等于把刚省下的帧头又加回来了。
+2. **`method` 是字符串，但接口只有三个函数。** 线上保持可读的方法名（schema 不定义），收发两端靠**同一套三函数 API**，不需要 RpcMap、不需要 name→id 表（`rpc_list` 已删，那张表迟早会和 schema 漂移）：
+
+```ts
+// 发：要回包
+callEntity<Rsp>("entity.attack", req): Promise<Rsp>
+// 发：组播 / 广播，不回包
+callGroup("scene.sync", req): void
+// 收：一个 handler 同时服务上面两种（广播进同一个函数）
+register("entity.attack", (req) => rsp): void
+```
+
+   **代价要说清**：方法名是字符串字面量，拼错只会在运行时变成"未知方法 → 丢弃 + 计数"，编译器查不出来。缓解手段是业务侧自己维护一份方法名常量（`const M = { attack: "entity.attack" } as const`），而不是再引入一张外置映射表。
+   **`<Rsp>` 骗不了运行时**：类型参数在运行时被擦除，回包是一段字节，**必须有一个运行时能拿到的东西**才知道拿谁去解。所以只有三条路，没有第四条：
+
+   | 方案 | 签名 | 代价 |
+   |---|---|---|
+   | **A（推荐） schema 当值传、类型自动推** | `callEntity(method, req: Uint8Array, rsp: DescMessage): Promise<MessageShape<Desc>>` | 调用点多传一个 `AttackResultSchema`；但**不用写泛型**，且类型与 schema 一定一致 |
+   | B 全局 registry 按 `$typeName` 反查 | `callEntity<Rsp>(method, req)` | 只对 `req` 有效；**回包字节里没有类型名**，仍然解不出来 |
+   | C 手写"方法 → 响应 schema"的运行时表 | `callEntity<Rsp>(method, req)` | 就是被否掉的 `RpcMap` 的运行时版本，又多一处会漂移的真相 |
+
 3. **gate 不要依赖"读固定偏移判断消息类型"。** protobuf 规范只保证**可解析**，不保证字段顺序（虽然 protobuf-go 与 protobuf-es 都按字段号升序写，我们实测两侧字节一致）。真要给战斗帧做优先级，就在 `flags` 里留 1 bit（现成有位），或者干脆让 gate 不关心类型。
 
 ### 4.8 不可逆 vs 可以后加
@@ -352,18 +419,30 @@ FlatBuffers 的 `struct`（定长内联）**一旦上线就冻结**——这一�
 schema/
   pb/
     common.proto        标识 / 错误码 / 通用包装
-    envelope.proto      Envelope（客户端可见）+ InternalEnvelope / InternalPayload（内部链路）
-    client_gate.proto   客户端 ⇄ gate
-    gate_logic.proto    gate ⇄ logic
-    logic_dbproxy.proto logic ⇄ dbproxy（存储原语）
+    envelope.proto      Envelope（唯一信封）+ MsgType enum
+    client.proto        客户端消费（含服务端对客户端的 CallEntity / CallGlobal）
+    gate.proto          服务端消费（客户端上行请求）
+    gate_logic.proto    logic → gate
+    logic_gate.proto    gate → logic
     logic_logic.proto   logic ⇄ logic
-  methods.yaml          method code 注册表（唯一源）→ 生成 TS / Go 常量
-  check.sh              codegen + 14 条结构断言
+  （无方法表）          方法名由调用方定义（点分隔短名）；类型绑定在业务侧的 RpcMap
+  check.sh              codegen + 11 条结构断言
 protocol/
   frame.ts              8 字节帧头编解码（**待写**；客户端一份、gate 一份，字节必须一致）
 ```
 
-**一份 `methods.yaml` 生成三处常量**：客户端 TS、gate Go、logic TS。`"player.move" ↔ 0x0204` 这种映射只在一处定义，名字对齐靠 codegen，不靠人。废弃 code 进 `retired:` 列表，CI 拦住复用。
+**方法名不在 schema 里定义。** `.proto` 只描述消息；方法名（`"entity.attack"` 这种）由调用方给，收发两端共用一套三函数 API：
+
+```ts
+// 发：要回包
+callEntity<Rsp>("entity.attack", req): Promise<Rsp>
+// 发：组播 / 广播，不回包
+callGroup("scene.sync", req): void
+// 收：同一个 handler 既收单播也收广播
+register("entity.attack", (req) => rsp): void
+```
+
+**代价要说清**：protoc 不再校验"方法↔消息"的配对（`service` 能做到），换来的是 schema 里没有一层容易过时的声明。
 
 ### 7.2 三条 CI 规矩
 
@@ -375,7 +454,7 @@ protocol/
 
 - [ ] 高频消息（≥5 Hz/连接）是 **SoA**；一次性对象是 AoS
 - [ ] 热路径消息里没有字符串/数组（有就拆包）
-- [ ] 新 method code 从 `methods.yaml` 申请，没有复用已废弃号
+- [ ] 新方法在业务侧 `RpcMap` / handler 注册表里登记（引用具体 message 类型）
 - [ ] 转发路径（gate）没有解 payload
 - [ ] 涉及金额/订单的消息入了审计日志
 - [ ] 量化参数与上一版一致（或 PR 显式标注变更）
@@ -386,7 +465,7 @@ protocol/
 
 | 阶段 | 内容 | 完成判据 |
 |---|---|---|
-| **P0** | 定帧头（§4）+ `Envelope` + `methods.yaml` + 两份帧头实现（TS/Go）+ 下面这张测试表全绿 | 见 §8.1 |
+| **P0** | 定帧头（§4）+ `Envelope` + 两份帧头实现（TS/Go）+ 下面这张测试表全绿 | 见 §8.1 |
 | **P1** | 第一条热路径消息用 **SoA** 实现（`MoveBatch`）；其余全 AoS | 端到端跑通；客户端每帧解码 < 1 ms |
 | **P2** | `SceneSnapshot` + `EntityDeltaBatch` 迁 SoA；引入 zstd-19（快照）/ zstd-3（>512 B 增量） | 带宽与 P1 对比有量化下降；解压不超 0.5% 帧预算 |
 | **P3** | gate 变"只读帧头"的透传器 | gate 单进程连接密度达标（对应 §8 的 S4） |
@@ -403,7 +482,7 @@ protocol/
 | 5 | 半包（只喂前 2 字节） | 等待不报错；继续喂够 4+len 后成功 |
 | 6 | 半包超时 5 s | 断开 |
 | 7 | `flags` bit0=1 但 payload 不是合法 zstd | 断开（数据损坏，不静默当明文） |
-| 8 | `Envelope` 的 `method` 不在 `methods.yaml` | **丢弃 + 计数，不断开**（前向兼容：新推送老客户端要无感忽略） |
+| 8 | `Envelope.method` 不在本端 `RpcMap` 里 | **丢弃 + 计数，不断开**（前向兼容：新推送老客户端要无感忽略） |
 | 9 | `Envelope` 的 `req_id` 重复 | 计数 + 告警（客户端 bug，不是攻击） |
 | 10 | `Envelope` 缺 `req_id`（=0）却是响应 | 丢弃 + 告警 |
 | 11 | 一个 WebSocket 消息里塞 3 帧（批量） | 三帧按序解析，字节边界不串 |
@@ -442,3 +521,15 @@ protocol/
 | ④ | `dirtyMask` 的粒度（按字段还是按实体） | **待拍板**：按字段省字节，但实现复杂；建议先按实体 |
 | ⑤ | 是否兼容 abelkhan 的 `proto/` | **【未核实】**：若复用它的服务端，method code 表要重新对 |
 | ⑥ | 帧头 `class` 字段（战斗帧优先级）是否真需要 | **未验证**：等 S4 压测才知道 |
+
+---
+
+## 11. 定稿状态（schema v1 已定，剩 1 条暂按默认实现）
+
+| # | 问题 | 两个选项 | 影响面 |
+|---|---|---|---|
+| ~~1~~ | ~~帧载荷到底是什么~~ | **已定**：帧载荷 = `Envelope`（唯一一层）；`content` 是逻辑层决定的业务消息字节，类型由 `method` 决定 | 见 §4.6 |
+| ~~2~~ | ~~CallEntityResult 还要不要~~ | **已删**：回包就是一条普通的 `Envelope{msg_type=RESPONSE, callback_id, status, body=<逻辑层决定的响应消息>}` | —— |
+| ~~3~~ | ~~两层的 callback_id / status 归属~~ | **消失**：只有一层信封，每个字段只有一份 | —— |
+| ~~4~~ | ~~CallEntity.entity_id = 0~~ | **已定**：客户端协议里单播带 `entity_id`（string，客户端可比对自检）、广播是 `CallGlobal`；**组播 `CallGroup{entity_ids}` 属于 hub → gate 的内部协议**（gate 负责实体→连接映射与去重） | gate 需要维护 `entity_id → conn` 的反向索引（给内部组播用） |
+| 5 | **服务端 → 客户端的调用要不要超时兜底** | **暂按"超时当失败"**（客户端可能正在加载/断线/被杀）；不做自动重试，要可靠就靠"客户端重连后拉待办" | 等 S5（滚动重启）跑完再复核 |

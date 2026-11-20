@@ -5,11 +5,20 @@ syntax = "proto3";
 // 对照 abelkhan：它的 hub_gate.proto 是同一层（gate 与逻辑 hub 之间的会话与投递）。
 //
 // 关键约束（docs/protocol-map.md §2 / §4）：
-//   · gate **不解** Envelope。它只读 4 字节帧头，然后把整段 payload 原样投给逻辑层。
-//     所以下面的 DeliverUpstream.payload 是**客户端的 Envelope 字节**，不是解码后的结构。
-//   · gate 的会话表是唯一的路由来源：连接 → session_id → entity_id → node_id。
-//     因此客户端上行消息里不需要目标信息。
-//   · 这一层的消息用 InternalEnvelope 包（见 envelope.proto），method 落在 0x0Axx 段。
+//   · **方法名不再是数字码段**：method 是字符串（"gate.xxx"），与客户端协议同一套规则。
+//   · 这一层的消息同样塞进 `Envelope`（envelope.proto）的 `body` 里；跨进程的路由信息
+//     **由消息自己的字段表达**（`conn_id` / `entity_id`），没有额外的内部封套；
+//     节点间的连接由部署拓扑决定（一条 gate→logic 的长连接就代表"发给这个节点"）。
+//   · gate 的会话表是路由的唯一来源：`conn_id → user_id / entity_id → node`；
+//     反向 `entity_id → conn_id` 用于把逻辑层的实体级投递变成连接级投递。
+//
+// 命名约定（**两种前缀都是 hub → gate**，区别是 gate 拿到后做什么）：
+//   · `Hub*`            = hub 要求 gate **维护状态**（建/删/刷新实体、踢人）→ 更新路由表
+//   · `GateForwardHub*` = hub 要求 gate **转发给客户端**（gate forwards hub's call → client）
+//
+// 实体生命周期走 `HubCreatePlayerEntity` / `HubCreateRemoteEntity` / `HubDeleteRemoteEntity` /
+// `HubRefreshEntity`：**gate 据此维护 `conn_id ⇄ entity_id` 的双向路由**，客户端协议里的
+// `CallEntity{entity_id, content}` 才能被翻译成"发给哪条连接"。
 
 package fw;
 
@@ -21,112 +30,94 @@ option go_package = "meter/schema/pb;pb";
 // 会话生命周期
 // ---------------------------------------------------------------------------
 
-// 建立会话（gate → logic，MSG_REQUEST，method = 0x0A01）。
-// 逻辑层在鉴权成功后调用；gate 收到应答后才会开始投递该会话的上行消息。
-message SessionBindRequest {
-  uint64 session_id = 1;
-  uint64 uid = 2;
-  uint64 entity_id = 3;
-
-  // 该连接所在的 gate 标识（逻辑层回推时用它选链路）。
-  string gate_id = 4;
-
-  // 客户端握手时协商到的协议版本与平台，供逻辑层做灰度决策。
-  uint32 proto_ver = 5;
-  string platform = 6;
-
-  // 客户端地址（仅日志用，可能已过 NAT）。
-  string remote_addr = 7;
-}
-
-message SessionBindResponse {
-  ErrorCode error = 1;
-}
-
-// 会话断开（gate → logic，MSG_NOTIFY，method = 0x0A02）。
-// gate 在 TCP/WS 断开时立即发；逻辑层据此做"角色离线"处理（注意：不是立即落库）。
-message SessionUnbind {
-  uint64 session_id = 1;
-  uint64 uid = 2;
-  ErrorCode error = 3;   // 断开原因（正常关闭填 0）
-}
-
-// 会话已被逻辑层判定失效，请求 gate 关闭连接（logic → gate，MSG_NOTIFY，method = 0x0A03）。
-message KickSession {
-  uint64 session_id = 1;
-  ErrorCode error = 2;
-  string detail = 3;
-}
-
-// 更新会话的实体绑定（例如角色切换、实体迁移后，msg_type = 0x0A04）。
-// gate 只改自己的路由表，不触碰 payload。
-message SessionRebind {
-  uint64 session_id = 1;
-  uint64 entity_id = 2;
-  string node_id = 3;
-}
 
 // ---------------------------------------------------------------------------
-// 数据面：上下行投递
+// 一、hub → gate：实体生命周期（gate 据此维护 conn ⇄ entity 双向路由）
 // ---------------------------------------------------------------------------
 //
-// 方向说明：gate 永远只是搬运工。它把客户端的一段 Envelope 字节塞进 payload，
-// 逻辑层解 envelope、按 method 分发；反过来也一样。
+// 命名约定：`Hub*` = hub（逻辑层）发给 gate 的；`GateForwardHub*` = gate 发给 hub 的。
 
-// 上行投递（gate → logic，MSG_NOTIFY，method = 0x0A10）。
-message DeliverUpstream {
-  uint64 session_id = 1;
-
-  // 客户端的原始 Envelope 字节（gate 未解析）。
-  bytes payload = 2;
-
-  // 该帧的到达时间（服务端毫秒），逻辑层可用它做事后统计；不要用于业务判定。
-  uint64 recv_time_ms = 3;
+// 玩家自己的实体创建：gate 在这里建立 `conn_id ⇄ entity_id` 的绑定。
+message HubCreatePlayerEntity {
+  string conn_id = 1;
+  string user_id = 2;
+  string entity_id = 3;
+  string entity_type = 4;
+  bytes content = 5;
 }
 
-// 下行投递（logic → gate，MSG_NOTIFY，method = 0x0A11）。
-message DeliverDownstream {
-  uint64 session_id = 1;
-
-  // 要原样发给客户端的 Envelope 字节。
-  bytes payload = 2;
-
-  // 允许整帧压缩的标记（0 = 不压，1 = zstd）。gate 只按位处理，不看内容。
-  uint32 compress = 3;
+// 视野内的远程实体创建（不是所有权，只是投影）。
+message HubCreateRemoteEntity {
+  string conn_id = 1;
+  string entity_id = 2;
+  string entity_type = 3;
+  bytes content = 4;
 }
 
-// 广播下行（logic → gate，MSG_NOTIFY，method = 0x0A12）。
-// 同一段字节发给多个会话时用它，避免 N 次 RPC 调用。
-message DeliverDownstreamBatch {
-  repeated uint64 session_ids = 1;
-  bytes payload = 2;
-  uint32 compress = 3;
+// 远程实体销毁（离开视野 / 死亡 / 被移除）。
+message HubDeleteRemoteEntity {
+  string conn_id = 1;
+  string entity_id = 2;
+}
+
+// 远程实体刷新（属性/外观/状态机变化，id 不变）。
+message HubRefreshEntity {
+  string conn_id = 1;
+  string entity_id = 2;
+  string entity_type = 3;
+  bytes content = 4;
+}
+
+// 请求 gate 踢掉某条连接上的客户端。
+// gate 收到后：给客户端发 `client.proto` 的 `KickOff{error, prompt_info}`，然后关闭连接。
+// **必须带 error**：客户端要按错误码分支（重复登录 → 提示"该账号已在别处登录"、
+// 被管理员踢 → 提示"您已被移出游戏"、过载 → 提示重试），只给一句文案是不够的。
+message HubKickOffClient {
+  string conn_id = 1;
+  ErrorCode error = 2;        // 与 client.proto 的 KickOff.error 同一个枚举语义
+  string prompt_info = 3;     // 直接展示给玩家的文案（可为空，客户端可按 error 自己取文案）
 }
 
 // ---------------------------------------------------------------------------
-// 健康与流量控制
+// 二、gate → hub：把客户端的调用转发给逻辑层
 // ---------------------------------------------------------------------------
 
-// 逻辑节点负载上报（logic → gate，MSG_NOTIFY，method = 0x0A20）。
-// gate 用它决定新会话分配到哪个节点（最简：轮询 + 低于阈值才分配）。
-message NodeLoadReport {
-  string node_id = 1;
-  uint32 sessions = 2;        // 当前承载会话数
-  uint32 tick_lag_ms = 3;     // 最近一次 tick 的延迟
-  bool accepting = 4;         // false = 不再接新会话（正在迁移/过载）
+// hub → gate → 客户端：把一次调用投给**某一条连接**。
+// `conn_id` 是 gate 的寻址单位；`entity_id` 会一起带给客户端，
+// 客户端拿它跟自己的实体比对，错投即可发现（廉价的路由自检）。
+message GateForwardHubCallClient {
+  string conn_id = 1;
+  string entity_id = 2;
+  bytes content = 3;
 }
 
-// gate 要求逻辑层停机（运维动作，gate → logic，MSG_NOTIFY，method = 0x0A21）。
+// hub → gate → 客户端：**组播**，一次发给多条连接。
+//   · `conn_id`（repeated）= 收件连接列表，由 hub 或 gate 解析出来（gate 负责按 conn 去重，
+//     因为玩家实体和它的宠物可能落在同一条连接上）；
+//   · `entity_id` = 发起方/上下文实体（客户端据此知道"这条广播因谁而起"，可为空）。
+message GateForwardHubCallGroup {
+  repeated string conn_id = 1;
+  string entity_id = 2;
+  bytes content = 3;
+}
+
+// hub → gate → 客户端：**广播**，发给所有在线连接。
+// 与 `client.proto` 的 `CallGlobal` 是同一动作的两个层：hub 告诉 gate 广播，
+// gate 再把 `CallGlobal{content, exclude_source}` 发给每个连接。
+// `entity_id` = 发起方/上下文实体（可为空）。
+message GateForwardHubCallGlobal {
+  string entity_id = 1;
+  bytes content = 2;
+}
+
+// ---------------------------------------------------------------------------
+// 停机排空（健康状态与负载上报由 consul 负责，不走消息）
+// ---------------------------------------------------------------------------
+
+// gate 要求逻辑层停机（运维动作，gate → logic，MSG_NOTIFY）。
 // 逻辑层应在此之后只处理在途请求，不再接新会话。
 message GateDrain {
   string gate_id = 1;
   uint32 grace_ms = 2;
   string reason = 3;
-}
-
-// gate 侧观测（可选）：单会话上行速率超限时的告警，给逻辑层做限流闭环。
-message SessionRateHint {
-  uint64 session_id = 1;
-  uint32 frames_per_sec = 2;
-  uint32 bytes_per_sec = 3;
 }

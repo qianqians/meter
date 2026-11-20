@@ -87,3 +87,6 @@ ENV/
 
 # Rope project settings
 .ropeproject
+
+# schema/check.sh 的中间产物（descriptor set + 校验用 bundle）
+.build/

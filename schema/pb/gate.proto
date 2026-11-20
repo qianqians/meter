@@ -1,0 +1,72 @@
+syntax = "proto3";
+
+// gate 层：**客户端发出的报文 + gate/服务端对客户端的调用**。
+//
+// 与 client.proto 的分工只有一条：**按方向切。**
+//   · client.proto = 服务端 → 客户端、客户端需要处理或应答的消息（LoginResult / CreateEntity / KickOff …）
+//   · gate.proto   = **gate/服务端消费**的报文：客户端发出的请求（Login / Reconnect / HeartBeat …）
+//
+// 客户端的**回包不需要单独的包体类型**：它就是一条普通帧，外层 `Envelope` 里
+// `msg_type = MSG_RESPONSE`、`callback_id` 回填请求的值、`status` 表成败、`body` 是逻辑层决定的响应消息。
+//
+// 层次（已定）：
+//
+//   帧头（二进制，不是 proto）   flags:zstd | len:包长 | ts:单调毫秒
+//   └─ Envelope                 ← **最外层结构**，每条帧的 payload 就是它
+//        msg_type / method / callback_id / status
+//        body ∈ NotifyConnID | LoginResult | CreateEntity | CallEntity | CallGlobal …
+//
+// `CallEntity` / `CallGlobal` 的 `content` 里是**逻辑层决定的那条 protobuf 消息的序列化字节**：
+// 框架（gate）**不解释它**，甚至连类型都不知道——类型由**外层 `Envelope.method`** 决定，
+// 客户端用 RpcMap、服务端用逻辑层的分发表各自解析。
+//
+// 所以只有一层 Envelope：method / callback_id / status 只在最外层出现一次，没有嵌套。
+
+package fw;
+
+import "common.proto";
+
+option go_package = "meter/schema/pb;pb";
+
+// ---------------------------------------------------------------------------
+// 一、客户端发出的请求
+// ---------------------------------------------------------------------------
+//
+// 这些是客户端**主动发起**的报文：客户端不"响应"自己发出的东西，所以它们不放在 client.proto。
+
+message Login {
+  // 平台登录票据（微信/抖音的 code，或服务端签发的 token）。框架不解释内容。
+  string token = 1;
+
+  // 期望进入的服务器/分线 id；空表示由服务端分配。
+  string server_id = 2;
+
+  // 客户端版本与平台，仅用于灰度与日志。
+  string client_ver = 3;
+  string platform = 4;
+}
+
+// 断线重连：与 Login 的区别是"接着用"而不是"重新登录"。
+message Reconnect {
+  string conn_id = 1;        // NotifyConnID 下发的旧 conn_id
+  bytes resume_token = 2;    // LoginResult.resume_token
+  uint64 last_recv_seq = 3;  // 已收到的最后一条可靠消息序号，用于补投
+}
+
+// 主动登出（走正常的存档与离线流程；与"被踢"不同）。
+message Logout {
+  string reason = 1;
+}
+
+// 心跳请求。最省的保活其实是 `len == 0` 的空帧（帧头的 ts 已能算 RTT），
+// 本消息只服务于"需要服务端校时"的场景；回包是 client.proto 的 HeartBeatResult。
+message HeartBeat {
+  uint64 client_time_ms = 1;
+}
+
+// 可靠消息确认（跨服/可离线消息的"至少一次 + 去重"）。
+// 客户端收到带 seq 的可靠消息并处理后，原样回填 seq。
+message AckReliable {
+  string entity_id = 1;
+  uint64 seq = 2;
+}

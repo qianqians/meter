@@ -1,0 +1,84 @@
+syntax = "proto3";
+
+// gate → logic（命名沿用 abelkhan 的 `<dst>_<src>` 约定：`logic_gate` = 发往 logic、来自 gate）。
+//
+// 这一层的三件事：
+//   ① 把客户端的上行**投递**给逻辑层（请求 / 响应 / 单向通知）
+//   ② 把"连接断了"这件事告诉逻辑层（逻辑层据此做离线处理与好友下线推送）
+//   ③ 把"重连 / 服务发现"这类不针对具体实体的请求转过去
+//
+// 与 `gate_logic.proto`（logic → gate）的分工：
+//   上行（客户端 → gate → logic）= 本文件；下行（logic → gate → 客户端）= gate_logic.proto。
+//
+// 约定：
+//   · 方法名由外层 `Envelope.method` 给（"entity.attack" 这种），本文件的消息只有形状；
+//   · `content` 一律是**客户端那条 `CallEntity.content` 的原样字节**——gate 不解、不改；
+//   · 客户端回给服务器的响应没有 `conn_id`：配对靠 `Envelope.callback_id`，
+//     逻辑层只关心"哪个实体的哪一次调用"，不关心它在哪条连接上。
+
+package fw;
+
+import "common.proto";
+
+option go_package = "meter/schema/pb;pb";
+
+// ---------------------------------------------------------------------------
+// 一、客户端上行的投递
+// ---------------------------------------------------------------------------
+
+// 客户端对某个实体的调用（要回包）。gate 收到 `Envelope{msg_type=REQUEST, body=CallEntity}` 后转发。
+message ClientRequestHub {
+  string conn_id = 1;      // 谁发的——逻辑层回包时用它（gate 再翻回连接）
+  string entity_id = 2;    // 客户端指定的目标实体（可能是自己的玩家、怪、NPC）
+  bytes  content = 3;      // 逻辑层决定的方法请求体
+}
+
+// 客户端对**服务端调用它**的响应（对应 logic → gate 的 `GateForwardHubCallClient`）。
+// 没有 `conn_id`：配对靠外层 `Envelope.callback_id`。
+message ClientResponseHub {
+  string entity_id = 1;    // 回应的实体（服务端发起调用时用的那个）
+  ErrorCode error = 2;     // 成功时为空，失败时给错误码与 detail
+  bytes  content = 3;      // 逻辑层决定的响应体（失败时通常为空）
+}
+
+// 客户端 → 服务端的单向通知（不回包）。
+message ClientNotifyHub {
+  string conn_id = 1;
+  string entity_id = 2;
+  bytes  content = 3;
+}
+
+// ---------------------------------------------------------------------------
+// 二、连接断开
+// ---------------------------------------------------------------------------
+
+// gate → logic：某条连接断了（正常关闭、心跳超时、被踢都会走这条）。
+// 逻辑层据此判断"这个实体是否离线"，并给好友/公会推下线事件。
+message ClientDisconnect {
+  string conn_id = 1;
+  string user_id = 2;      // 已登录才填；未登录为空（只打日志）
+  string entity_id = 3;    // 该连接上绑定的实体；多实体时由逻辑层按会话清理
+  ErrorCode error = 4;     // 断开原因（0 = 正常关闭；有值 = 心跳超时/被踢/协议错误）
+}
+
+// ---------------------------------------------------------------------------
+// 三、不属于任何实体的客户端请求
+// ---------------------------------------------------------------------------
+
+// 断线重连：客户端带着旧 `conn_id` + `resume_token` 回来，gate 把它转给逻辑层判定。
+// 逻辑层成功后会重新下发 `HubCreatePlayerEntity`，gate 据此建立新的 `conn_id ⇄ entity_id`。
+message GateForwardClientRequestReconnect {
+  string gate_name = 1;    // 哪台 gate（多台时必须带，逻辑层要回它）
+  string conn_id = 2;      // 新的连接 id（旧的已作废）
+  string user_id = 3;      // 已登录用户；未知时为空，由逻辑层凭 resume_token 判定
+  bytes  content = 4;      // 客户端 `Reconnect.content` 的原样字节
+}
+
+// 服务级请求：目标不是一个实体，而是一个"服务"（排行榜、跨服匹配、商城结算……）。
+// 这类请求没有 entity_id，靠 `service_name` 分发。
+message GateForwardClientRequestService {
+  string service_name = 1; // 逻辑层注册的服务名（"rank" / "match" / "shop" …）
+  string gate_name = 2;
+  string conn_id = 3;
+  bytes  content = 4;      // 客户端决定的服务请求体
+}

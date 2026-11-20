@@ -26,7 +26,7 @@
 | 层 | 定稿 | 一句话理由 | 证据 |
 |---|---|---|---|
 | **接入层 gate** | **Go** | 瓶颈是 syscall / 拷贝 / 加解密 / 连接状态，与语言无关；goroutine-per-conn + 复用缓冲可做到每连接零分配 | 【前序会话】 |
-| **数据层 dbproxy** | **Go** | 瓶颈在 DB 与路由，不在语言；与 gate 共用一套运维与发布 | 【前序会话】 |
+| ~~数据层 dbproxy~~ | **已取消（2026-11-20）** | **数据落地放 hub**：逻辑层直接写存储，少一层进程 = 少一跳、少一套部署 | 【一手·决策】 |
 | **逻辑层 core** | **TS**（Node 可跑、Cocos 可跑、零 `cc` 依赖） | 与 Cocos 同语言 ⇒ 客户端共享代码；且 TS 的性能是"白送"的（§3） | 【实测-本机】§3 |
 | **热路径内核** | **Cython / C**，按 profile 结果**逐段**下沉 | 同一段循环，Python 地板比 V8 慢约 80×，但天花板与之重合（§3） | 【实测-本机】§3 |
 | **视图层** | Cocos Creator 为**一等目标**；Unity/Unreal 经 Puerts 为**可选** | 一等目标只允许一个，否则要付四端对等的代价（§1） | 【前序会话】 |
@@ -58,7 +58,7 @@
 ### 1.1 三个被淘汰/降级的选项，理由分别是
 
 - **C#：不是被性能淘汰的。** .NET 8 的稳态吞吐与尾延迟足以做这件事，Orleans 也是这类系统的合理答案。它被淘汰的唯一理由是**换不到东西**：客户端是 Cocos(TS)，"与客户端共享代码"这条唯一的净收益归零，而代价是引入第二个运行时、第二套 GC/构建/发布、以及又一次跨语言边界。
-- **Scala：被"平台 vs 工具包"和运维重量淘汰。** 差异不在性能，在编排模型——Orleans 是**平台**（启动 silo，成员管理/放置/激活回收/定时器/存储全由运行时负责，对外只有"接口 + await"），Pekko 是**一组库**（`ActorSystem` 只是容器，Sharding / Persistence / Streams 要自己拼）。【前序会话：这一条是当轮的对照结论，本轮未重新核对】对一个还需要自己写 gate 与 dbproxy 的项目，"多一层要自己拼的库"是净负担。
+- **Scala：被"平台 vs 工具包"和运维重量淘汰。** 差异不在性能，在编排模型——Orleans 是**平台**（启动 silo，成员管理/放置/激活回收/定时器/存储全由运行时负责，对外只有"接口 + await"），Pekko 是**一组库**（`ActorSystem` 只是容器，Sharding / Persistence / Streams 要自己拼）。【前序会话：这一条是当轮的对照结论，本轮未重新核对】对一个还需要自己写 gate 的项目，"多一层要自己拼的库"是净负担。
 - **Python：没有被淘汰，是被降级。** 它从"逻辑层候选"变成"热路径内核的工具"。原先反对它的理由（高密度实时战斗、每 tick 遍历几万实体）在 V2 的规模下面不成立；支持它的理由（Cython 逐段下沉、`importlib.reload` 真热更）保留下来，但都不足以撑起整个逻辑层。
 
 ### 1.2 为什么不是"C# 服务端 + C# 逻辑"（也就是本仓库另一份文档的路径）
@@ -87,8 +87,7 @@ flowchart TB
   end
 
   subgraph DATA["数据层"]
-    D["dbproxy · Go<br/>路由 · 批量 · 事务边界"]
-    DB[("DB + 缓存")]
+    DB[("DB + 缓存<br/>由 hub 内的存储模块直连")]
   end
 
   C1 -->|WebSocket| G
@@ -97,13 +96,13 @@ flowchart TB
   AD --> K
   K -.->|profile 之后才允许| N
   G -->|protobuf| K
-  K --> D --> DB
+  K --> DB
 ```
 
 | 层 | 语言 | 职责 | **禁止** |
 |---|---|---|---|
 | gate | Go | 长连接、TLS/WS、限流、加解密、路由、重连、会话映射 | 任何游戏规则；任何"顺手算一下"的判定 |
-| dbproxy | Go | 存储路由、批量合并、事务边界、缓存一致性 | 业务语义（"这个道具该不该给"不属于它） |
+| ~~dbproxy~~ | —— | **已取消**：存储访问下沉为 hub 内的一个模块（驱动、批量合并、版本 CAS、缓存一致性） | 业务语义仍不属于它——它只是 hub 内部的一层，不是独立进程 |
 | **core** | TS | 世界状态与**唯一写权**、AOI、战斗判定、任务、掉落 | **`import 'cc'`**；直接碰 socket；持有渲染态 |
 | adapter-cocos | TS | 输入采集、表现插值、把 core 的差分画出来 | 持有权威状态；写规则 |
 | kernel | Cython/C | AOI 网格、位压缩、批处理等被 profile 证明的热点 | 成为**第二套**业务逻辑（一旦规则出现在这里，core 就不再有唯一写权） |
@@ -325,7 +324,7 @@ npx --yes -p typescript@5.9 tsc -p .   # → exit 0
 
 ### 6.2 能复用的是"拓扑形状"，不是代码
 
-abelkhan 的结构（`core/` RPC、`engine/`、`gate/`、`hub/`、`proto/`、`dependences/{consul,redis}`、MongoDB 存储、protobuf 序列化）【一手，见 [`mmorpg-engine-choice.md`](mmorpg-engine-choice.md) §8.1】——本文的分层几乎是同一个形状：**gate + hub(逻辑) + dbproxy + protobuf**。差别只在实现语言：gate/dbproxy 换成 Go，逻辑层换成 TS。
+abelkhan 的结构（`core/` RPC、`engine/`、`gate/`、`hub/`、`proto/`、`dependences/{consul,redis}`、MongoDB 存储、protobuf 序列化）【一手，见 [`mmorpg-engine-choice.md`](mmorpg-engine-choice.md) §8.1】——本文的分层几乎是同一个形状：**gate + hub(逻辑) + protobuf**。差别只在实现语言：gate 换成 Go，逻辑层换成 TS；而 abelkhan 由 hub 直连 MongoDB 的做法，我们后来也照搬了（**不设 dbproxy**）。
 
 也就是说：**abelkhan 对本文最大的贡献是"证明了这套拓扑在 C# 里能跑"，而不是"我们可以直接用它"。**
 
@@ -337,7 +336,7 @@ abelkhan 的结构（`core/` RPC、`engine/`、`gate/`、`hub/`、`proto/`、`de
 
 ### 6.4 一个未验证的可选路径（记在这里，别当方案用）
 
-若将来复用 abelkhan 的 `hub` / `dbproxy`，它们与 Go gate 之间本来就通——abelkhan 的协议层就是 protobuf。但这只是"理论上是通的"，**本轮未做任何验证**，见 §7-⑥。
+若将来复用 abelkhan 的 `hub`，它与 Go gate 之间本来就通——abelkhan 的协议层就是 protobuf。但这只是"理论上是通的"，**本轮未做任何验证**，见 §7-⑥。
 
 ---
 
