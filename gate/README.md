@@ -62,13 +62,16 @@ python3 scripts/smoke.py 127.0.0.1 19101 19102
 
 ## 路由规则（`internal/hub`）
 
+**客户端的 body 永远是 oneof**（`ClientUplink` / `ClientDownlink`），形状由 protobuf 自己表达——
+不用靠"方法名以 client. 开头"这种约定去猜是 `CallEntity` 还是别的消息。
+
 | 方向 | 输入 | 输出 |
 |---|---|---|
-| 客户端 → 逻辑 | `Envelope{REQUEST/NOTIFY, method, body=CallEntity}` | `ClientRequestHub` / `ClientNotifyHub{conn_id, entity_id, content}` |
-| 客户端 → 逻辑（响应） | `Envelope{RESPONSE}` | `ClientResponseHub{entity_id, error, content}` |
-| 逻辑 → 客户端（调用） | `GateForwardHubCallClient/Group/Global` | `Envelope{method=业务方法名, body=CallEntity/CallGlobal}` |
-| 逻辑 → 客户端（视图） | `HubCreatePlayerEntity/CreateRemoteEntity/DeleteRemoteEntity/RefreshEntity` | `client.createPlayerEntity` 等固定方法名 |
-| 逻辑 → gate（踢人） | `HubKickOffClient{conn_id, error, prompt_info}` | `KickOff` 后关闭（`SendAndClose`，尽量不留关闭竞态） |
+| 客户端 → 逻辑 | `Envelope{REQUEST, method=业务方法名, body=ClientUplink{call=CallEntity}}` | `Envelope{method="gate.clientRequest", body=ClientRequestHub{conn_id, entity_id, content, method}}` |
+| 客户端 → 逻辑（框架消息） | `ClientUplink{login/reconnect/logout/heartbeat/ack}` | `Envelope{method="gate.clientUplink", body=原样}` |
+| 逻辑 → 客户端（调用） | `GateForwardHubCallClient/Group/Global` | `Envelope{method=业务方法名, body=ClientDownlink{call}}` |
+| 逻辑 → 客户端（视图） | `HubCreatePlayerEntity/…/RefreshEntity` | `Envelope{method="", body=ClientDownlink{create_player/create_remote/refresh/delete}}` |
+| 逻辑 → gate（踢人） | `HubKickOffClient{conn_id, error, prompt_info}` | `ClientDownlink{kick_off}` 后关闭（`SendAndClose`） |
 
 **gate 不解 `content`**：它只读 `entity_id` / `conn_id` 用于寻址，`content` 原样搬。唯一的翻译是"内部消息 → 客户端消息"这一层包装。
 

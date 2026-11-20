@@ -101,6 +101,11 @@ def decode_frame(buf):
     return buf[8:8 + n], buf[8 + n:]
 
 
+def uplink_call(entity_id, content=b""):
+    """ClientUplink{ oneof body { CallEntity call = 6; } }"""
+    return pb_msg(6, pb_str(1, entity_id) + pb_msg(2, content))
+
+
 def envelope(msg_type, method, callback_id=0, body=b""):
     e = pb_u32(1, msg_type) if msg_type else b""
     e += pb_str(2, method) if method else b""
@@ -221,67 +226,67 @@ def main():
     ws = WSClient()
     print("① 两个端口都连上了（TCP 逻辑链路 + WebSocket 客户端）")
 
-    # P0 里 gate 不自己处理 login：会话由逻辑层的 HubCreatePlayerEntity 建立。
-    # 先发一条未登录请求，确认它被丢弃（不转发）。
-    ws.send(encode_frame(envelope(1, "entity.attack", 7, pb_msg(1, b""))))
-    fwd = logic.recv()
-    if fwd is None:
-        print("② gate 把未登录连接的请求**丢弃**了（符合 P0 设计：会话由逻辑层建立）")
+    # --- 未登录连接的上行应被丢弃（会话由逻辑层的 HubCreatePlayerEntity 建立） ---
+    ws.send(encode_frame(envelope(1, "entity.attack", 7, uplink_call("e-nobody", b""))))
+    if logic.recv(1.2) is None:
+        print("② 未登录上行被丢弃（符合设计）")
     else:
-        fields = pb_fields(fwd)
-        print("② gate 转发了上行:", {k: v for k, v in fields.items() if k != 4})
+        print("② 未登录上行竟然被转发了 —— 失败")
+        ok = False
 
-    # 让逻辑层主动建会话（conn_id 用 c-1，是 gate 的第一条连接）
+    # --- 逻辑层建会话：gate 建立 conn ⇄ entity，并给客户端推 ClientDownlink.create_player ---
     logic.send(envelope(3, "hub.createPlayerEntity", 0,
                         pb_str(1, "c-1") + pb_str(2, "u-smoke") + pb_str(3, "e-smoke") + pb_str(4, "player")))
     got = ws.recv(2)
-    if got is not None:
-        f = pb_fields(decode_frame(got)[0])
-        print("③ 客户端收到建实体推送:", {"method": f[2][0].decode(),
-                                     "entity": pb_fields(f[4][0])[1][0].decode()})
-    else:
+    if got is None:
         print("③ 客户端没收到建实体推送 —— 失败")
         ok = False
+    else:
+        f = pb_fields(decode_frame(got)[0])
+        create = pb_fields(pb_fields(f[4][0])[5][0])   # ClientDownlink.create_player = 5
+        print("③ 客户端收到 ClientDownlink.create_player:", {"entity": create[1][0].decode()})
 
-    ws.send(encode_frame(envelope(1, "entity.attack", 7, pb_msg(1, b""))))
+    # --- 建会话后的上行：gate 应包成 ClientRequestHub{..., method} 转给逻辑层 ---
+    ws.send(encode_frame(envelope(1, "entity.attack", 7, uplink_call("e-smoke", b""))))
     fwd = logic.recv()
     if fwd is None:
-        print("③ 建会话后仍未转发 —— 失败")
+        print("④ 建会话后仍未转发 —— 失败")
         ok = False
     else:
-        fields = pb_fields(fwd)
-        up = pb_fields(fields[4][0])
-        print("④ 建会话后 gate 转发 ClientRequestHub:",
-              {"conn": up[1][0].decode(), "entity": up[2][0].decode() if 2 in up else "",
-               "method": fields[2][0].decode(), "callback": fields[3][0]})
+        f = pb_fields(fwd)
+        up = pb_fields(f[4][0])
+        print("④ gate 转发 ClientRequestHub:",
+              {"route": f[2][0].decode(), "conn": up[1][0].decode(), "entity": up[2][0].decode(),
+               "method": up[4][0].decode(), "content": up[3][0].hex(), "callback": f[3][0]})
 
-    # 逻辑层调客户端：外层 method = **路由方法**（gate 靠它知道 body 是什么），
-    # 业务方法名在 body.method 里，gate 会把它放进下发的 Envelope.method。
+    # --- 逻辑层调客户端：gate 译成 ClientDownlink.call，method 用业务方法名 ---
     logic.send(envelope(1, "gate.forwardHubCallClient", 11,
-                        pb_str(1, "c-1") + pb_str(2, "e-smoke") + pb_msg(3, b"\x09\x09") + pb_str(4, "entity.attack")))
-    got = ws.recv()
-    if got is not None:
-        got = decode_frame(got)[0]   # WS 载荷里还有我们的 8 字节帧头
+                        pb_str(1, "c-1") + pb_str(2, "e-smoke") + pb_msg(3, b"		") + pb_str(4, "entity.attack")))
+    got = ws.recv(2)
     if got is None:
-        print("④ 客户端没收到 CallEntity —— 失败")
+        print("⑤ 客户端没收到 CallEntity —— 失败")
         ok = False
     else:
-        fields = pb_fields(got)
-        ce = pb_fields(fields[4][0])
-        print("⑤ 逻辑层调客户端，客户端收到:", {"msg_type": fields.get(1, [None])[0], "method": fields[2][0].decode(),
-                              "entity": ce[1][0].decode(), "content": ce[2][0].hex(),
-                              "callback": fields.get(3, [0])[0]})
+        f = pb_fields(decode_frame(got)[0])
+        ce = pb_fields(pb_fields(f[4][0])[12][0])        # ClientDownlink.call = 12
+        print("⑤ 客户端收到 ClientDownlink.call:", {"msg_type": f.get(1, [0])[0], "method": f[2][0].decode(),
+                                                   "entity": ce[1][0].decode(), "content": ce[2][0].hex(),
+                                                   "callback": f.get(3, [0])[0]})
 
-    # 踢人
-    # HubKickOffClient{conn_id=1, error=2(ErrorCode), prompt_info=3}
+    # --- 踢人：HubKickOffClient → ClientDownlink.kick_off ---
     logic.send(envelope(3, "hub.kickOffClient", 0,
                         pb_str(1, "c-1") + pb_msg(2, pb_u32(1, 4)) + pb_str(3, "冒烟踢人")))
     got = ws.recv(2)
+    kicked = False
     if got is not None:
-        got = decode_frame(got)[0]
-    print("⑥ 踢人:", "收到 KickOff" if got else "未收到（可能已断开）")
+        down = pb_fields(pb_fields(decode_frame(got)[0])[4][0])
+        kicked = 9 in down                                # ClientDownlink.kick_off = 9
+    print("⑥ 踢人:", "收到 ClientDownlink.kick_off" if kicked else "未收到（可能已断开）")
+    if not kicked:
+        ok = False
 
-    print("\n冒烟" + ("通过 ✅" if ok else "失败 ❌"))
+    print()
+    print("冒烟" + ("通过 ✅" if ok else "失败 ❌"))
     sys.exit(0 if ok else 1)
 
 

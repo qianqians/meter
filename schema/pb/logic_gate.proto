@@ -31,6 +31,7 @@ message ClientRequestHub {
   string conn_id = 1;      // 谁发的——逻辑层回包时用它（gate 再翻回连接）
   string entity_id = 2;    // 客户端指定的目标实体（可能是自己的玩家、怪、NPC）
   bytes  content = 3;      // 逻辑层决定的方法请求体
+  string method = 4;       // **业务方法名**（外层 Envelope.method 装的是路由方法）
 }
 
 // 客户端对**服务端调用它**的响应（对应 logic → gate 的 `GateForwardHubCallClient`）。
@@ -39,6 +40,7 @@ message ClientResponseHub {
   string entity_id = 1;    // 回应的实体（服务端发起调用时用的那个）
   ErrorCode error = 2;     // 成功时为空，失败时给错误码与 detail
   bytes  content = 3;      // 逻辑层决定的响应体（失败时通常为空）
+  string method = 4;       // 业务方法名（响应对应的方法）
 }
 
 // 客户端 → 服务端的单向通知（不回包）。
@@ -46,6 +48,7 @@ message ClientNotifyHub {
   string conn_id = 1;
   string entity_id = 2;
   bytes  content = 3;
+  string method = 4;       // 业务方法名（同 ClientRequestHub）
 }
 
 // ---------------------------------------------------------------------------

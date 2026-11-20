@@ -70,3 +70,20 @@ message AckReliable {
   string entity_id = 1;
   uint64 seq = 2;
 }
+
+// ---------------------------------------------------------------------------
+// 四、上行统一包装
+// ---------------------------------------------------------------------------
+//
+// 与 `ClientDownlink` 对称：客户端发出的每一帧，body 都是这个 oneof。
+// `Envelope.method` 只在 `call` 成员上有意义（业务方法名）；框架消息留空。
+message ClientUplink {
+  oneof body {
+    Login       login     = 1;
+    Reconnect   reconnect = 2;
+    Logout      logout    = 3;
+    HeartBeat   heartbeat = 4;
+    AckReliable ack       = 5;
+    CallEntity  call      = 6;   // 带 entity_id 的业务调用（怪 / NPC / 自己）
+  }
+}

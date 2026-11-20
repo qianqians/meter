@@ -201,3 +201,31 @@ message ServerNotice {
   string text = 2;
   uint32 retry_after_ms = 3; // 维护/限流时的建议重试间隔
 }
+
+// ---------------------------------------------------------------------------
+// 11. 下行统一包装：**形状自描述**
+// ---------------------------------------------------------------------------
+//
+// 问题：客户端一侧可能收到 13 种不同的 body，而 `Envelope.method` 只有一个字符串。
+// 如果靠"方法名以 client. 开头就是框架消息、否则是 CallEntity"这种约定，
+// 拼错前缀就静默错路由（gate 在 GateForwardHubCallClient 上踩过同款坑）。
+//
+// 解法：body 永远是这个 `oneof`——**形状由 protobuf 自己表达**，下游不再猜。
+// `Envelope.method` 只在 `call` / `global` 两种成员上有意义（业务方法名），其余留空。
+message ClientDownlink {
+  oneof body {
+    NotifyConnID       conn_id          = 1;   // 连接建立后第一条
+    LoginResult        login            = 2;
+    ReconnectResult    reconnect        = 3;
+    HeartBeatResult    heartbeat        = 4;
+    CreatePlayerEntity create_player    = 5;
+    CreateRemoteEntity create_remote    = 6;
+    RefreshEntity      refresh          = 7;
+    DeleteEntity       delete           = 8;
+    KickOff            kick_off         = 9;
+    NotifyError        error            = 10;
+    ServerNotice       notice           = 11;
+    CallEntity         call             = 12;  // 单播：调某个实体（method = 业务方法名）
+    CallGlobal         global           = 13;  // 广播（method = 业务方法名）
+  }
+}

@@ -111,12 +111,11 @@ func (h *Hub) ClientCount() int {
 
 // ---------------- 客户端 → 逻辑层 ----------------
 
-// OnClientFrame 处理一条来自客户端的原始帧：这里统一解 Envelope 并统计该跳的单向延迟。
+// OnClientFrame 处理一条来自客户端的原始帧：解 Envelope → 解 **ClientUplink oneof** → 分派。
 // 接入层（WebSocket）只负责"把字节读成帧"，不做信封层的事。
 func (h *Hub) OnClientFrame(connID string, f frame.Frame) {
 	if len(f.Payload) == 0 {
-		// len == 0 的帧约定为 ping：由接入层直接回空帧即可，这里无事可做
-		return
+		return // len==0 的帧是 ping，接入层直接回空帧
 	}
 	if ms, suspect := frame.OneWayDelayMs(h.now(), f.TS); suspect {
 		log.Printf("[%s] 异常时钟：延迟 %d ms（已 clamp，不参与判定）", connID, ms)
@@ -124,72 +123,64 @@ func (h *Hub) OnClientFrame(connID string, f frame.Frame) {
 
 	var env pb.Envelope
 	if err := proto.Unmarshal(f.Payload, &env); err != nil {
-		h.mu.Lock()
-		h.stats.BadEnvelope++
-		h.mu.Unlock()
+		h.badEnvelope()
 		return
 	}
-	h.OnClient(connID, &env)
+	var up pb.ClientUplink
+	if err := proto.Unmarshal(env.GetBody(), &up); err != nil {
+		h.badEnvelope()
+		return
+	}
+	h.OnClient(connID, &env, &up)
 }
 
-
-// OnClient 处理一条来自客户端的 Envelope。
-func (h *Hub) OnClient(connID string, env *pb.Envelope) {
+// OnClient 按 oneof 的成员分派。形状由 protobuf 表达，这里不再靠方法名前缀猜。
+func (h *Hub) OnClient(connID string, env *pb.Envelope, up *pb.ClientUplink) {
 	h.mu.Lock()
 	h.stats.ClientFrames++
 	h.mu.Unlock()
 
-	switch env.GetMsgType() {
-	case pb.MsgType_MSG_REQUEST, pb.MsgType_MSG_NOTIFY:
-		h.forwardUp(connID, env)
-	case pb.MsgType_MSG_RESPONSE:
-		// 客户端对服务端 CallEntity 的响应：配对靠 callback_id，逻辑层只需要知道是哪个实体
-		s, ok := h.sess.ByConn(connID)
-		if !ok {
-			h.mu.Lock()
-			h.stats.UnknownClient++
-			h.mu.Unlock()
-			return
-		}
-		body, err := protoMarshal(&pb.ClientResponseHub{
-			EntityId: s.EntityID,
-			Error:    errorOf(env.GetStatus(), env.GetBody()),
-			Content:  env.GetBody(),
-		})
-		if err != nil {
-			return
-		}
-		h.sendToLogic(env.GetMethod(), pb.MsgType_MSG_RESPONSE, env.GetCallbackId(), body)
-	default:
+	switch body := up.GetBody().(type) {
+	case *pb.ClientUplink_Call:
+		h.forwardCall(connID, env, body.Call)
+	case *pb.ClientUplink_Login, *pb.ClientUplink_Reconnect, *pb.ClientUplink_Logout,
+		*pb.ClientUplink_Heartbeat, *pb.ClientUplink_Ack:
+		// 框架消息：原样交给逻辑层（gate 不解释），body 仍是 ClientUplink 的字节
+		h.sendToLogic("gate.clientUplink", env.GetMsgType(), env.GetCallbackId(), env.GetBody())
 		h.mu.Lock()
-		h.stats.BadEnvelope++
+		h.stats.ForwardedUp++
 		h.mu.Unlock()
+	default:
+		h.badEnvelope()
 	}
 }
 
-// forwardUp 把客户端上行包成 ClientRequestHub / ClientNotifyHub 转给逻辑层。
-// `content` 原样搬运——gate 不解它（它就是客户端 CallEntity.content 的字节）。
-func (h *Hub) forwardUp(connID string, env *pb.Envelope) {
+// forwardCall 处理 CallEntity：要回包的走 ClientRequestHub，否则走 ClientNotifyHub。
+func (h *Hub) forwardCall(connID string, env *pb.Envelope, call *pb.CallEntity) {
 	s, ok := h.sess.ByConn(connID)
 	if !ok {
-		// 未登录的 REQUEST 也没有目标实体：直接回 NOT_AUTHED 更友好，但 P0 先丢弃并计数
 		h.mu.Lock()
 		h.stats.UnknownClient++
 		h.mu.Unlock()
 		return
 	}
+	_ = s // 会话存在即可；目标实体来自 call.entity_id（可能是别的怪/NPC）
 
 	var body []byte
 	var err error
 	if env.GetMsgType() == pb.MsgType_MSG_REQUEST {
-		body, err = protoMarshal(&pb.ClientRequestHub{ConnId: connID, EntityId: s.EntityID, Content: env.GetBody()})
+		body, err = protoMarshal(&pb.ClientRequestHub{
+			ConnId: connID, EntityId: call.GetEntityId(), Content: call.GetContent(), Method: env.GetMethod(),
+		})
 	} else {
-		body, err = protoMarshal(&pb.ClientNotifyHub{ConnId: connID, EntityId: s.EntityID, Content: env.GetBody()})
+		body, err = protoMarshal(&pb.ClientNotifyHub{
+			ConnId: connID, EntityId: call.GetEntityId(), Content: call.GetContent(), Method: env.GetMethod(),
+		})
 	}
 	if err != nil {
 		return
 	}
-	h.sendToLogic(env.GetMethod(), env.GetMsgType(), env.GetCallbackId(), body)
+	h.sendToLogic("gate.clientRequest", env.GetMsgType(), env.GetCallbackId(), body)
 	h.mu.Lock()
 	h.stats.ForwardedUp++
 	h.mu.Unlock()
@@ -233,34 +224,42 @@ func (h *Hub) OnLogic(nodeID string, env *pb.Envelope) {
 			log.Printf("实体 %s 被新连接重新绑定，踢掉旧连接 %s", m.GetEntityId(), evicted.ConnID)
 			h.kick(evicted.ConnID, 4, "该账号已在别处登录")
 		}
-		h.deliver(m.GetConnId(), "client.createPlayerEntity", mustMarshal(&pb.CreatePlayerEntity{
-			EntityId: m.GetEntityId(), EntityType: m.GetEntityType(), Content: m.GetContent(),
-		}))
+		h.deliverDown(m.GetConnId(), "", &pb.ClientDownlink{
+			Body: &pb.ClientDownlink_CreatePlayer{CreatePlayer: &pb.CreatePlayerEntity{
+				EntityId: m.GetEntityId(), EntityType: m.GetEntityType(), Content: m.GetContent(),
+			}},
+		})
 
 	case "hub.createRemoteEntity":
 		var m pb.HubCreateRemoteEntity
 		if !h.unmarshalBody(env, &m) {
 			return
 		}
-		h.deliver(m.GetConnId(), "client.createRemoteEntity", mustMarshal(&pb.CreateRemoteEntity{
-			EntityId: m.GetEntityId(), EntityType: m.GetEntityType(), Content: m.GetContent(),
-		}))
+		h.deliverDown(m.GetConnId(), "", &pb.ClientDownlink{
+			Body: &pb.ClientDownlink_CreateRemote{CreateRemote: &pb.CreateRemoteEntity{
+				EntityId: m.GetEntityId(), EntityType: m.GetEntityType(), Content: m.GetContent(),
+			}},
+		})
 
 	case "hub.deleteRemoteEntity":
 		var m pb.HubDeleteRemoteEntity
 		if !h.unmarshalBody(env, &m) {
 			return
 		}
-		h.deliver(m.GetConnId(), "client.deleteRemoteEntity", mustMarshal(&pb.DeleteEntity{EntityId: m.GetEntityId()}))
+		h.deliverDown(m.GetConnId(), "", &pb.ClientDownlink{
+			Body: &pb.ClientDownlink_Delete{Delete: &pb.DeleteEntity{EntityId: m.GetEntityId()}},
+		})
 
 	case "hub.refreshEntity":
 		var m pb.HubRefreshEntity
 		if !h.unmarshalBody(env, &m) {
 			return
 		}
-		h.deliver(m.GetConnId(), "client.refreshEntity", mustMarshal(&pb.RefreshEntity{
-			EntityId: m.GetEntityId(), EntityType: m.GetEntityType(), Content: m.GetContent(),
-		}))
+		h.deliverDown(m.GetConnId(), "", &pb.ClientDownlink{
+			Body: &pb.ClientDownlink_Refresh{Refresh: &pb.RefreshEntity{
+				EntityId: m.GetEntityId(), EntityType: m.GetEntityType(), Content: m.GetContent(),
+			}},
+		})
 
 	case "hub.kickOffClient":
 		var m pb.HubKickOffClient
@@ -302,7 +301,9 @@ func (h *Hub) OnLogic(nodeID string, env *pb.Envelope) {
 		out := &pb.Envelope{
 			MsgType: pb.MsgType_MSG_NOTIFY,
 			Method:  m.GetMethod(),
-			Body:    mustMarshal(&pb.CallGlobal{Content: m.GetContent()}),
+			Body: mustMarshal(&pb.ClientDownlink{
+				Body: &pb.ClientDownlink_Global{Global: &pb.CallGlobal{Content: m.GetContent()}},
+			}),
 		}
 		for _, p := range peers {
 			_ = p.Send(out)
@@ -324,12 +325,14 @@ func (h *Hub) sendCallEntity(connID, entityID, method string, callbackID uint32,
 	if callbackID != 0 {
 		msgType = pb.MsgType_MSG_REQUEST
 	}
-	body := mustMarshal(&pb.CallEntity{EntityId: entityID, Content: content})
-	h.deliver(connID, method, body, withMsgType(msgType), withCallback(callbackID))
+	h.deliverDown(connID, method, &pb.ClientDownlink{
+		Body: &pb.ClientDownlink_Call{Call: &pb.CallEntity{EntityId: entityID, Content: content}},
+	}, withMsgType(msgType), withCallback(callbackID))
 }
 
-// deliver 把一段 body 发给某条客户端连接。
-func (h *Hub) deliver(connID, method string, body []byte, opts ...deliverOpt) {
+// deliverDown 把一条 ClientDownlink 发给某条客户端连接。
+// method 只在 call / global 两种成员上有意义（业务方法名），其余传空。
+func (h *Hub) deliverDown(connID, method string, down *pb.ClientDownlink, opts ...deliverOpt) {
 	o := deliverOptions{msgType: pb.MsgType_MSG_NOTIFY}
 	for _, f := range opts {
 		f(&o)
@@ -343,7 +346,7 @@ func (h *Hub) deliver(connID, method string, body []byte, opts ...deliverOpt) {
 		h.mu.Unlock()
 		return
 	}
-	_ = p.Send(&pb.Envelope{MsgType: o.msgType, Method: method, CallbackId: o.callbackID, Body: body})
+	_ = p.Send(&pb.Envelope{MsgType: o.msgType, Method: method, CallbackId: o.callbackID, Body: mustMarshal(down)})
 	h.mu.Lock()
 	h.stats.ForwardedDown++
 	h.mu.Unlock()
@@ -378,8 +381,11 @@ func (h *Hub) kick(connID string, code int, prompt string) {
 	h.mu.RUnlock()
 	env := &pb.Envelope{
 		MsgType: pb.MsgType_MSG_NOTIFY,
-		Method:  "client.kickOff",
-		Body:    mustMarshal(&pb.KickOff{Error: &pb.ErrorCode{Code: int32(code), Detail: prompt}, PromptInfo: prompt}),
+		Body: mustMarshal(&pb.ClientDownlink{
+			Body: &pb.ClientDownlink_KickOff{KickOff: &pb.KickOff{
+				Error: &pb.ErrorCode{Code: int32(code), Detail: prompt}, PromptInfo: prompt,
+			}},
+		}),
 	}
 	if sc, ok := p.(interface{ SendAndClose(*pb.Envelope) error }); ok && p != nil {
 		_ = sc.SendAndClose(env)

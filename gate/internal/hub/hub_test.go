@@ -55,21 +55,24 @@ func TestClientRequestForwardedUp(t *testing.T) {
 	sess.Bind(session.Session{ConnID: "c1", UserID: "u1", EntityID: "e1", NodeID: "n1"})
 
 	content := []byte{1, 2, 3}
-	h.OnClient("c1", &pb.Envelope{MsgType: pb.MsgType_MSG_REQUEST, Method: "entity.attack", CallbackId: 7, Body: content})
+	mkUp := func(entityID string) *pb.ClientUplink {
+		return &pb.ClientUplink{Body: &pb.ClientUplink_Call{Call: &pb.CallEntity{EntityId: entityID, Content: content}}}
+	}
+	h.OnClient("c1", &pb.Envelope{MsgType: pb.MsgType_MSG_REQUEST, Method: "entity.attack", CallbackId: 7}, mkUp("e1"))
 
 	got := logic.last()
 	if got == nil {
 		t.Fatal("逻辑层没收到转发")
 	}
-	if got.GetMethod() != "entity.attack" || got.GetCallbackId() != 7 || got.GetMsgType() != pb.MsgType_MSG_REQUEST {
-		t.Fatalf("信封字段不对: %+v", got)
+	if got.GetMethod() != "gate.clientRequest" || got.GetCallbackId() != 7 || got.GetMsgType() != pb.MsgType_MSG_REQUEST {
+		t.Fatalf("外层应是路由方法 + 原 callback_id: %+v", got)
 	}
 	var up pb.ClientRequestHub
 	if err := proto.Unmarshal(got.GetBody(), &up); err != nil {
 		t.Fatal(err)
 	}
-	if up.GetConnId() != "c1" || up.GetEntityId() != "e1" {
-		t.Fatalf("寻址字段不对: %+v", &up)
+	if up.GetConnId() != "c1" || up.GetEntityId() != "e1" || up.GetMethod() != "entity.attack" {
+		t.Fatalf("寻址/业务方法字段不对: %+v", &up)
 	}
 	if string(up.GetContent()) != string(content) {
 		t.Fatalf("content 不应被改写: %v", up.GetContent())
@@ -83,7 +86,8 @@ func TestUnauthedClientDropped(t *testing.T) {
 	h.AddClient("c1", client)
 	h.AddLogic("n1", logic)
 
-	h.OnClient("c1", &pb.Envelope{MsgType: pb.MsgType_MSG_REQUEST, Method: "entity.attack", CallbackId: 1})
+	h.OnClient("c1", &pb.Envelope{MsgType: pb.MsgType_MSG_REQUEST, Method: "entity.attack", CallbackId: 1},
+		&pb.ClientUplink{Body: &pb.ClientUplink_Call{Call: &pb.CallEntity{EntityId: "e1"}}})
 	if logic.count() != 0 {
 		t.Fatal("未登录不应转发")
 	}
@@ -112,12 +116,13 @@ func TestLogicCallClientDelivered(t *testing.T) {
 	if got.GetMethod() != "entity.attack" {
 		t.Fatalf("客户端应收到业务方法名，而不是路由方法名: %q", got.GetMethod())
 	}
-	var ce pb.CallEntity
-	if err := proto.Unmarshal(got.GetBody(), &ce); err != nil {
+	var down pb.ClientDownlink
+	if err := proto.Unmarshal(got.GetBody(), &down); err != nil {
 		t.Fatal(err)
 	}
-	if ce.GetEntityId() != "e1" || string(ce.GetContent()) != string([]byte{9, 9}) {
-		t.Fatalf("CallEntity 不对: %+v", &ce)
+	ce := down.GetCall()
+	if ce == nil || ce.GetEntityId() != "e1" || string(ce.GetContent()) != string([]byte{9, 9}) {
+		t.Fatalf("ClientDownlink.call 不对: %+v", &down)
 	}
 }
 
@@ -150,12 +155,12 @@ func TestGlobalBroadcast(t *testing.T) {
 		if c.count() != 1 || c.last().GetMsgType() != pb.MsgType_MSG_NOTIFY {
 			t.Fatalf("广播应各发一条 NOTIFY: %d", c.count())
 		}
-		var cg pb.CallGlobal
-		if err := proto.Unmarshal(c.last().GetBody(), &cg); err != nil {
+		var down pb.ClientDownlink
+		if err := proto.Unmarshal(c.last().GetBody(), &down); err != nil {
 			t.Fatal(err)
 		}
-		if len(cg.GetContent()) != 1 {
-			t.Fatalf("CallGlobal.content 不对: %+v", &cg)
+		if cg := down.GetGlobal(); cg == nil || len(cg.GetContent()) != 1 {
+			t.Fatalf("ClientDownlink.global 不对: %+v", &down)
 		}
 	}
 }
@@ -173,8 +178,12 @@ func TestCreatePlayerEntityEvictsOldConn(t *testing.T) {
 	h.OnLogic("n1", &pb.Envelope{Method: "hub.createPlayerEntity", Body: mk("old")})
 	h.OnLogic("n1", &pb.Envelope{Method: "hub.createPlayerEntity", Body: mk("new")})
 
-	if oldConn.count() == 0 || oldConn.last().GetMethod() != "client.kickOff" {
+	if oldConn.count() == 0 {
 		t.Fatal("旧连接应收到 KickOff")
+	}
+	var down pb.ClientDownlink
+	if err := proto.Unmarshal(oldConn.last().GetBody(), &down); err != nil || down.GetKickOff() == nil {
+		t.Fatalf("旧连接应收到 ClientDownlink.kick_off: %v %+v", err, &down)
 	}
 }
 

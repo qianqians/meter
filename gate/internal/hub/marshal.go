@@ -39,3 +39,10 @@ func errorOf(status uint32, body []byte) *pb.ErrorCode {
 	}
 	return &e
 }
+
+// badEnvelope 计一次"解不开的信封/oneof"。
+func (h *Hub) badEnvelope() {
+	h.mu.Lock()
+	h.stats.BadEnvelope++
+	h.mu.Unlock()
+}
