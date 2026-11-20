@@ -16,6 +16,7 @@ gate/
   internal/clientgate/      对外 WebSocket 接入（gorilla/websocket）
   internal/logiclink/       对内 TCP 接入（逻辑节点连进来）
   internal/hub/             **中央路由**：客户端 ⇄ 逻辑层、组播去重、广播、踢人
+  internal/registry/        **consul**：服务注册 / TTL 心跳 / 状态上报 / 注销（不引 SDK，直接打 HTTP API）
   internal/session/         会话表：conn → (user, entity, node) / entity → conn
   internal/frame/           8 字节帧头（与 core/src/frame.ts 逐字节一致）
   internal/pb/              codegen 产物（gitignored）
@@ -49,6 +50,60 @@ python3 scripts/smoke.py 127.0.0.1 19101 19102
 ⑥ 踢人: 收到 KickOff
 冒烟通过 ✅
 ```
+
+## consul：注册 + 状态上报
+
+```bash
+go run ./cmd/gate -client :9001 -logic :9002   -consul http://127.0.0.1:8500 -node-id gate-1 -advertise 10.0.0.11   -consul-ttl 30s -report-every 10s
+```
+
+| 时刻 | 动作 | 落到 consul |
+|---|---|---|
+| 启动 | `PUT /v1/agent/service/register` | 服务 `gate`、**对内端口**、tags、meta（版本 / 客户端端口 / ws_path）+ **一条 TTL 健康检查** |
+| 每 10s | `PUT /v1/agent/check/pass/service:<id>?note=…` | **既是心跳，也是状态上报**：`clients=42 logic=1 up=12000 down=8000 miss=3 kicks=1 bad=0` |
+| 退出 | `PUT /v1/agent/service/deregister/<id>` | 主动摘掉，不用等 TTL 过期变 critical |
+
+### 服务 id 与注册地址：**默认带 IP**
+
+```
+id    = gate-<advertise-ip>-<对内端口>     # 例如 gate-10.0.0.11-9002
+addr  = 注册到 consul 的 Address
+Port  = 对内 TCP 端口（逻辑层连这个）
+Meta  = { version, client_port, ws_path }   # 客户端用的 WebSocket 端口在 meta 里
+```
+
+**为什么注册对内端口而不是对外端口**：consul 的消费方是**逻辑层**——它要发现 gate 的
+internal TCP 端口然后连上来（见"两个端口为什么这样分工"）。客户端不走 consul：小游戏/H5
+的入口地址是运营配置或平台下发的，把它塞进 `Port` 会让逻辑层连错端口。
+
+为什么不用主机名：gate 会**部署在多台服务器**上，而容器/云主机的 hostname 往往是随机串
+（滚动发布每次换一个，consul 里会堆一堆已注销的旧节点）；IP 至少在同一网段内唯一，运维和
+客户端都能直接用。
+
+`-advertise` 为空时的探测顺序：
+
+| # | 条件 | 取什么 |
+|---|---|---|
+| ① | `-advertise 10.0.0.11` | 就用它 |
+| ② | `-client 10.0.0.11:9001`（写了具体 IP） | 那个 IP |
+| ③ | `-client myhost:9001`（写了主机名） | `LookupHost` 解析出的 IP |
+| ④ | `-client :9001` / `0.0.0.0:9001` | **本机第一个非回环 IPv4（私网优先）** |
+| ⑤ | 连网卡都查不到 | 退回主机名 |
+
+启动日志会把结果打出来，别猜：
+
+```
+注册信息：id=gate-192.168.0.15-19251 addr=192.168.0.15 port=19251
+已注册到 consul：gate-192.168.0.15-19251（TTL 30s）
+```
+
+要固定一个不随机器变化的 id（比如按角色/序号），显式传 `-node-id gate-a`。
+
+三条设计取舍：
+
+1. **不引 consul SDK**：需要的只有 3 个 PUT，用 `net/http` 直接打，省一个依赖也省一次版本升级。
+2. **状态走 TTL check 的 `note`**：consul UI 与 `/v1/health/service/gate` 都能直接读到，不需要再引一套存储；**真正的时序指标（p50/p99、GC、连接曲线）应该交给 Prometheus**，consul 只回答"这个节点活着吗、现在大概什么规模"。
+3. **`-consul` 留空 = 空实现**（`registry.Nop`），本地开发不用起 consul；注册失败也只打日志、继续跑——**服务发现挂了不该让接入层起不来**。
 
 ## 两个端口为什么这样分工
 

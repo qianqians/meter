@@ -96,6 +96,9 @@ func (h *Hub) RemoveLogic(nodeID string) {
 	log.Printf("逻辑节点断开: %s（剩 %d 个）", nodeID, h.logicCount())
 }
 
+// LogicCount 已接入的逻辑节点数。
+func (h *Hub) LogicCount() int { return h.logicCount() }
+
 func (h *Hub) logicCount() int {
 	h.mu.RLock()
 	defer h.mu.RUnlock()

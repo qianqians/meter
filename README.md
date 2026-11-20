@@ -108,6 +108,7 @@ cd ../gate && go build ./... && go test ./... && go run ./cmd/gate -listen :9001
 - **会话表**：`conn → (user, entity, node)` 与 `entity → conn` 双向；同实体被新连接绑走时返回旧会话由 gate 踢掉
 - **两个监听端口**：对外 WebSocket（客户端）、对内 TCP（逻辑节点连入，首帧 `logic.hello`）
 - **hub 路由**：上行包成 `ClientRequestHub/NotifyHub/ResponseHub`，下行把 `Hub*` / `GateForwardHub*` 译成客户端消息；组播按连接去重、广播遍历
+- **consul**：服务注册（**注册对内 TCP 端口**，客户端端口放 meta）+ TTL 心跳 + 状态上报（`clients=… logic=… up=… down=…`）+ 退出注销；不引 SDK，`-consul` 留空则空实现
 - 已冒烟（`gate/scripts/smoke.py`，零依赖）：两个端口 → 建会话 → 上行转发 → 逻辑层调客户端 → 踢人，六步全过
 
 ### 另一处例外：`spikes/`
