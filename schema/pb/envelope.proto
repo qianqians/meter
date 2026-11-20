@@ -10,25 +10,31 @@ syntax = "proto3";
 //
 // 为什么 msg_type 用 uint32 而不是 proto enum：protoc-gen-es 会把 proto enum
 // 生成为真正的 TS `enum`，而 core 开了 erasableSyntaxOnly 会直接 TS1294 编不过
-// （实测见 docs/protocol-map.md §4.5.1）。这里是框架内部标签，取值语义由本文档定义。
+// （实测见 docs/protocol-map.md §4.6.1）。这里是框架内部标签，取值语义由本文档定义。
 
 package fw;
 
 option go_package = "meter/schema/pb;pb";
 
-// msg_type 的取值（不在 schema 里定义 enum——见下面理由）：
-//   0 = MSG_NONE      未设置 / 非法，收到即丢弃并计数（fail-fast，不猜）
-//   1 = MSG_REQUEST   请求，必须有 callback_id > 0
-//   2 = MSG_RESPONSE  响应，callback_id 原样回填；status 见 common.ErrorCode
-//   3 = MSG_NOTIFY    单向通知/推送，callback_id 必须为 0
+// msg_type 的取值。
 //
-// 为什么连这个 enum 都不写进 schema：protoc-gen-es 会把 proto enum 生成为**真正的 TS `enum`**，
-// 而只要 core 里还有 `erasableSyntaxOnly`，那个文件就直接 TS1294 编不过（实测见
-// docs/protocol-map.md §4.5.1）。这几个常量由 schema/methods.yaml 生成两边的 const，成本几乎为零。
+// 这里用 proto enum（而不是 uint32 + 手写常量）：客户端是 Cocos、服务端是 Bun，
+// 两边都能直接执行/编译 TS `enum`，所以 `erasableSyntaxOnly` 这个约束已经被放弃
+// （决策与代价见 docs/protocol-map.md §4.6.1）。enum 换来的是：类型检查、穷尽 switch、
+// Go 侧自动生成的常量，以及 schema 自身即文档。
+//
+// ⚠️ proto3 的 enum 是**开放**的：不认识的值会被原样保留为数字（不会报错）。
+// 所以接收端必须有 default 分支——未知 msg_type **丢弃 + 计数**，绝不猜。
+enum MsgType {
+  MSG_NONE = 0;      // 未设置 / 非法：收到即丢弃
+  MSG_REQUEST = 1;   // 请求：必须有 callback_id > 0
+  MSG_RESPONSE = 2;  // 响应：callback_id 原样回填
+  MSG_NOTIFY = 3;    // 单向通知：callback_id 必须为 0
+}
 
 message Envelope {
-  // 消息类型，取上面 MSG_* 的值。
-  uint32 msg_type = 1;
+  // 消息类型。用 enum 而不是 uint32（理由见文件头）。
+  MsgType msg_type = 1;
 
   // 方法码，见 schema/methods.yaml（框架面已分配 0x00xx–0x0Cxx，功能域从 0x10xx 起）。
   uint32 method = 2;

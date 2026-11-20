@@ -50,7 +50,7 @@ schema/
     logic_logic.proto     logic ⇄ logic
   methods.yaml            method code 注册表（唯一源）+ msg_type 常量
   check.sh                codegen + 结构校验（一条命令）
-  verify.mjs              12 条结构断言
+  verify.mjs              14 条结构断言
   gen-methods.mjs         methods.yaml → TS/Go 常量
 ```
 
@@ -69,7 +69,7 @@ cd schema
 （经 `spikes/ser-compare/gen-es.mjs`，绕开 Windows 上 npm 只给 `.cmd`、protoc/buf 不能直接调用的问题）
 → `methods.yaml` 生成常量 → 打一份 bundle 后跑 `verify.mjs`。
 
-**12 条结构断言**（全部实测通过）：
+**14 条结构断言**（全部实测通过）：
 
 | # | 断言 |
 |---|---|
@@ -84,7 +84,9 @@ cd schema
 | 9 | 存储读响应可往返（`value` 为不透明字节，含 `version`） |
 | 10 | `methodMeta(code)` 反查可用（接收端按 code 找名字，未知 code 丢弃+计数） |
 | 11 | method 常量与 `methods.yaml` 一致（抽样 6 个） |
-| 12 | **生成的 TS 里没有 `export enum`**（否则 `core` 的 `erasableSyntaxOnly` 会挂，见 `docs/protocol-map.md` §4.5.1） |
+| 12 | **`MsgType` 由 proto enum 生成**（不再手写常量；`erasableSyntaxOnly` 已放弃，见 `docs/protocol-map.md` §4.6.1） |
+| 13 | 未知 `msg_type` 的值被原样保留（proto3 开放枚举）⇒ 接收端必须 `default` 丢弃 |
+| 14 | 未知 method code 反查为 `undefined`（据此丢弃 + 计数） |
 
 ---
 
@@ -102,7 +104,7 @@ cd schema
 
 | 项 | 状态 |
 |---|---|
-| 4 字节帧头的 TS/Go 实现 + 13 条帧头验收测试（`docs/protocol-map.md` §8.1） | **未做**（下一步） |
+| 8 字节帧头的 TS/Go 实现 + 15 条帧头验收测试（`docs/protocol-map.md` §8.1） | **未做**（下一步） |
 | 业务域 proto（背包/任务/战斗/…） | 按需求**暂不生成** |
 | `methods.yaml` 的 CI 生成物一致性检查（`./check.sh && git diff --exit-code`） | 需接进 CI |
 | abelkhan 的 `hub_hub` 里那些社交/跨服业务消息 | 属业务域，不在此处 |

@@ -14,7 +14,7 @@
 | 目录 | 回答的问题 |
 |---|---|
 | [`ts-vs-python/`](ts-vs-python/) | 同一个积分循环，V8（TypedArray）与 CPython 的四种写法各是多少 ns/实体·tick？"TS 封顶、Python 门票制"这个判断成立吗？ |
-| [`ts-runtime/`](ts-runtime/) | TS 编译后就是 JS，那么 TS 的真实优化手法里哪几条的量级最大？（数据布局 / 遍历 / 分配 / 序列化 / 调用点）；以及两条工具链断言：`erasableSyntaxOnly` 真的能拦住 `enum`、`package.json#imports` 真的不靠转译器 |
+| [`ts-runtime/`](ts-runtime/) | TS 编译后就是 JS，那么 TS 的真实优化手法里哪几条的量级最大？（数据布局 / 遍历 / 分配 / 序列化 / 调用点）；以及 `package.json#imports` 真的不靠转译器（另有一条**历史证据**：`erasableSyntaxOnly` 确实会拦住 `enum`——那条约束后来被放弃了） |
 | [`aoi-tick/`](aoi-tick/) | 一个 MMO 场景的一 tick（积分 + 网格重建 + AOI 查询 + 属性打包）到底花多少毫秒？按 2w DAU 折算要几核？ |
 | [`ser-compare/`](ser-compare/) | 同一份 schema 下 flatbuffer 与 protobuf 的字节数、encode、read 各差多少？该砍一个还是分工？（TS 与 Go 两侧都测） |
 | [`rpc-typing/`](rpc-typing/) | 不写泛型参数、让方法名字面量同时决定请求与响应类型的 RPC 类型，在 TS 5.9 `--strict` 下真的成立吗？错用会被编译期拦住吗？ |
@@ -32,6 +32,30 @@ bun  soak.mjs --minutes=60 --hz=20 --scenes=2 --entities=400 # 长跑
 **判据先写死，再看结果**（脚本里就是这三个）：A RSS 收敛（末 20% vs 首 20% 中位数，增长 <10% 且 <32 MB）；
 B p99 不漂移（末 20% ≤ 首 20% × 1.5）；C 末段 10 分钟 RSS 斜率 < 0.5 MB/min；D 兜底：RSS > 1.5 GB 立即中止。
 采样写进 `.soak/*.jsonl`（已 gitignore）。
+
+配套两个脚本：
+
+| 脚本 | 用途 |
+|---|---|
+| `soak-analyze.mjs` | 把 jsonl 变成"每 5 分钟一档 + 全程线性拟合"的报表，并按同样三条判据给结论 |
+| `gc-settle.mjs` | 判定"对象数/内存缓涨"是**垃圾未回收**还是**真泄漏**：跑 30 s → 记数 → 强制 GC → 再看，看计数是否回到同一个值 |
+
+**Bun 1.4.5 跑满 60 分钟**（2 场景 × 400 实体、20 Hz、zstd、72,001 tick）：
+RSS 39.0 → 39.2 MB（+0.5%）、p99 0.378 → 0.354 ms、全程斜率 **0.0003 MB/min** ⇒ A/B/C 全过，峰值 44.2 MB。
+`objects` 看似从 1.7 万爬到 2.5 万，但它是**锯齿**（后半段净变化为负），且强制 GC 后每轮都回到 14,510 ± 1 —— 回收滞后的垃圾，不是泄漏。
+
+**同负载三方对照**（同参数、都是 20.0 tick/s）：
+
+| 指标 | Node 18 · 无压缩 | **Bun · 无压缩** | Bun · zstd |
+|---|---:|---:|---:|
+| p50 tick | 0.315–0.321 ms | **0.196–0.206 ms** | 0.233–0.243 ms |
+| p99 tick | 0.47–0.67 ms | **0.25–0.41 ms** | 0.34–0.38 ms |
+| RSS 稳态 | 55.8 MB | 39.6 MB | **39.2 MB** |
+| heapUsed 中位 | 10.4 MB | 2.4 MB | 2.4 MB |
+| A/B/C 判据 | 全过 | 全过 | 全过 |
+
+严格同构的一对是前两列（都不压缩）：**Bun p50 快 37%、p99 快一倍以上、RSS 少 29%、heapUsed 少 77%**。
+第三列顺带量出：**zstd 在 Bun 上值 38 µs/tick**（0.238 − 0.200），与 `compress-bench` 的 N=60 数（53 µs）同量级。
 
 ## 一、ts-vs-python：地板与天花板
 
@@ -136,7 +160,7 @@ N = 1000 实体；两侧产出的**字节流完全一致**（50433 / 64096 / 340
 
 | 断言 | 文件 | 结果 |
 |---|---|---|
-| `erasableSyntaxOnly` 会拦住不可擦除语法 | `ts-runtime/erasable-syntax/enum.ts` | `error TS1294`，**exit 2**（就是要它失败） |
+| **历史证据**：`erasableSyntaxOnly` 会拦住不可擦除语法（该约束已放弃，见 `docs/protocol-map.md` §4.6.1） | `ts-runtime/erasable-syntax/enum.ts` | `error TS1294`，**exit 2**（就是要它失败） |
 | `package.json#imports` 的 `#core/*` 由运行时自己解析 | `ts-runtime/imports-field/` | `node app.mjs` → `imports-field-ok`，**exit 0**（Node 18.20.8） |
 
 这两条合起来说明一件事：**"零编译步骤也能跑"不是习惯问题，是可以被工具强制的**——

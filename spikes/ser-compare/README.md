@@ -48,7 +48,7 @@ GOGC=800 ./bench-go.exe 1000 30
 | `msg_type=0` | 105 | 5 B（字段本身被省略） |
 
 **同时测出一个会咬人的点**：`.proto` 里写 `enum` 时，`protoc-gen-es` 会生成真正的 TS `enum`，
-`tsc --erasableSyntaxOnly` 直接 `error TS1294`（`es-check-env/tsconfig.json` 可复现）。
+`tsc --erasableSyntaxOnly` 直接 `error TS1294`（`es-check-env/tsconfig.json` 可复现）。**这条约束后来被放弃了**（运行时是 Cocos + Bun，都支持 enum），留着仅作历史证据。
 所以 `core` 依赖的 schema 里不要写 enum，或者把生成物隔离进"必须编译"的包里。
 
 ## 压缩实验：`compress-bench.mjs`
@@ -107,7 +107,7 @@ GOGC=800 ./bench-go.exe 1000 30
 node es-pitfalls.mjs     # 15 条断言，全过 exit 0
 ```
 
-`erasableSyntaxOnly` 兼容性验证（protobuf-es 生成的 TS 要能在 `core` 的"零编译步骤"约束下编译）：
+`erasableSyntaxOnly` 兼容性验证 —— **历史证据**（该约束已放弃，见 `docs/protocol-map.md` §4.6.1）：
 
 ```bash
 npx --yes -p typescript@5.9 tsc -p es-check     # 期望 exit 0

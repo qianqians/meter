@@ -32,7 +32,7 @@
 | **视图层** | Cocos Creator 为**一等目标**；Unity/Unreal 经 Puerts 为**可选** | 一等目标只允许一个，否则要付四端对等的代价（§1） | 【前序会话】 |
 | **协议** | **全部 protobuf**：热路径用 SoA（packed 数组），冷路径用 AoS；帧头留 1 字节 `fmt` 做后路 | §8.2 的 FB 优势在换成 SoA 布局后缩到 4 µs/帧（0.03% 预算），且压缩后字节差仅 5%——不值得背第二套 schema | 【实测-本机】§8.2 + `protocol-map.md` |
 | **RPC 类型** | 方法名**字面量**同时决定请求与响应类型，调用处零泛型参数 | 已在 TS 5.9 `--strict` 下验证：正例通过、4 条反例全部被拒 | 【实测-本机】§5 |
-| **TS 执行方式** | 开发 `tsx`；`core` 开 `erasableSyntaxOnly`；路径用 `package.json#imports` | 擦除 ≠ 转换；别名由运行时解析的写法才不需要给每一处转译器配一遍 | 【一手】§4 |
+| **TS 执行方式** | 开发 `tsx` 或 `bun`；路径用 `package.json#imports`；**不启用 `erasableSyntaxOnly`**（已主动放弃，见 §4.2 / `protocol-map.md` §4.6.1） | 别名由运行时解析的写法才不需要给每一处转译器配一遍；枚举要能用 | 【一手】§4 |
 
 **但真正需要读的是"为什么"，不是这张表。** 因为这套栈不是被"哪门语言快"决定的：
 
@@ -207,14 +207,14 @@ flowchart TB
 | **tsx**（esbuild 驱动） | `npx tsx app.ts` | Node 生态最成熟，Node 18 就能用【实测-本机：Node 18.20.8 对 `--experimental-strip-types` / `--experimental-transform-types` 都报 `bad option`，而 `npx tsx t.ts` 直接跑通】 |
 | ts-node / swc-node | `ts-node app.ts` | 老牌、慢、ESM 支持差，新项目不建议【前序会话】 |
 
-### 4.2 擦除模式下"一用就炸"的语法
+### 4.2 擦除模式下"一用就炸"的语法 —— **已放弃的方案，仅存档**
 
-`enum` / `namespace` / 构造函数参数属性 / 装饰器 / `const enum` —— 擦除只是**删掉类型注解**，不做任何代码改写，所以这些语法擦完就不存在了。
+`enum` / `namespace` / 构造函数参数属性 / 装饰器 / `const enum` —— 在**只能擦除、不能转换**的运行时（`node --experimental-strip-types`）里，这些语法擦完就不存在了。
 
-**解法不是记住这份清单，而是让编译器替你记住**：
+当时的解法是用编译器把这个清单变成硬错误：
 
 ```jsonc
-// core/tsconfig.json
+// core/tsconfig.json —— ⚠️ 已弃用，见 protocol-map.md §4.6.1
 { "compilerOptions": { "erasableSyntaxOnly": true } }
 ```
 
@@ -224,7 +224,9 @@ flowchart TB
 error TS1294: This syntax is not allowed when 'erasableSyntaxOnly' is enabled.
 ```
 
-复现脚本：[`../spikes/ts-runtime/erasable-syntax/`](../spikes/ts-runtime/erasable-syntax/)（**这个用例就是应该失败**）。于是"`core` 能不能被零编译步骤直接跑"从一条口头约定变成一条 CI 断言。
+复现脚本：[`../spikes/ts-runtime/erasable-syntax/`](../spikes/ts-runtime/erasable-syntax/)（**这个用例就是应该失败**）。
+
+> ⚠️ **这套做法后来被主动放弃了**：运行时定为 **Cocos（客户端）+ Bun（服务端逻辑层）**，两边都能直接吃 `enum`/装饰器，"零构建直跑"这个收益换不到任何东西，而代价是放弃枚举、放弃穷尽 `switch`、把枚举语义退化成注释。现在只保留 **`verbatimModuleSyntax` + `import type`** 纪律（那才是真正的收益）。完整取舍见 [`protocol-map.md`](protocol-map.md) §4.6.1。
 
 ### 4.3 `import type`：擦除模式下的头号线上事故
 
@@ -347,7 +349,7 @@ abelkhan 的结构（`core/` RPC、`engine/`、`gate/`、`hub/`、`proto/`、`de
 | ② | Node 22.6+ 原生擦除 / 23.6 默认开启、Bun/Deno 的实际启动开销 | **【前序会话】**，本机 Node 18.20.8 无法验证 | 只影响开发体验，不影响架构 |
 | ③ | Cython 的**跨平台构建**（Linux 容器、cp312/cp314 ABI、CI 产物分发） | **【未核实】**，本轮只在 Windows 本机编过 | 若 CI 出不了产物，kernel 这条腿就断了 |
 | ④ | **2w DAU → 机器数 / 带宽 / 内存** | **【未核实·说明性】**：全部是算术推演，没有任何压测 | 这是决策者最想要、本文最给不出的数字（§8-S1/S4 就是补它） |
-| ⑤ | Cocos 3.x 自家编译链与 `erasableSyntaxOnly` / `package.json#imports` 的兼容性 | **【未核实】**，本轮只验证了 Node 与 tsc | 若 Cocos 的构建不认 `imports` 字段，adapter 侧要退回相对路径 |
+| ⑤ | Cocos 3.x 自家编译链与 `package.json#imports` 的兼容性（`erasableSyntaxOnly` 已放弃，不再需要） | **【未核实】**，本轮只验证了 Node 与 tsc | 若 Cocos 的构建不认 `imports` 字段，adapter 侧要退回相对路径 |
 | ⑥ | Go gate ↔ C# hub 的互通（复用 abelkhan 时） | **【未核实】**，纯属"看起来通" | §6.4 的可选路径是否成立 |
 | ⑦ | 小游戏 runtime 的 WebSocket 能力上限（帧率、单帧字节、`permessage-deflate`） | **【一手·口述】**：用户确认 `new WebSocket` 可用；**上限未测** | 决定 gate 的限流参数与"要不要自建压缩层" |
 | ⑧ | TS `core` 在**真实形状**（AOI 网格 + 属性 diff + 位压缩）下的每 tick 耗时 | ✅ **已核实**（§8.1）：400 实体/场景 0.17 ms、1 万 5.21 ms、3 万 15.77 ms | 已改写 §0 的量级表述 |
@@ -459,7 +461,7 @@ S2 里 protobuf 那几行用的是 **protobufjs**——那是"最快能跑起来
 
 | 判据 | **protobuf-es v2**（`@bufbuild/protobuf` 2.6.3） | **protobufjs 7** |
 |---|---|---|
-| **`erasableSyntaxOnly`**（`core` 硬要求） | 生成**真 TS 源**：type-only interface + `MessageSchema` 常量，无 `class`/`namespace`。`tsc --erasableSyntaxOnly --verbatimModuleSyntax --strict` → **exit 0** ｜ ⚠️ **但这条只在 schema 里没有 `enum` 时成立**：`.proto` 一旦写 `enum`，protoc-gen-es 会生成真正的 TS `enum` → **`error TS1294`，编不过**（本轮实测，见 [`protocol-map.md`](protocol-map.md) §4.5.1） | 运行时尚可，但产物是 **CommonJS**：ESM 里必须 `createRequire`（本轮实测）。它的 `pbts` 类型声明也能过 erasable 检查（ambient namespace 合法），所以这条判据不区分两者——真正的冲突是 CJS/ESM |
+| **枚举支持**（曾被 `erasableSyntaxOnly` 卡住，现已不卡） | 生成**真 TS 源**：type-only interface + `MessageSchema` 常量；proto 里的 `enum` 会生成真正的 TS `enum`——因为运行时是 Cocos + Bun，**这正是我们要的**（见 [`protocol-map.md`](protocol-map.md) §4.6.1） | 运行时尚可，但产物是 **CommonJS**：ESM 里必须 `createRequire`（本轮实测）。它的 `pbts` 类型声明也能过 erasable 检查（ambient namespace 合法），所以这条判据不区分两者——真正的冲突是 CJS/ESM |
 | **64 位语义** | 原生 `bigint` | 不收 `bigint`，**静默写成 0**（§8.2 的坑） |
 | **客户端包体**（minified / gzip） | 100.5 KB / **27.7 KB** | 70.6 KB / **16.0 KB**（FlatBuffers 仅 23.6 KB / **4.1 KB**） |
 
@@ -535,6 +537,93 @@ S2 里 protobuf 那几行用的是 **protobufjs**——那是"最快能跑起来
 **⚠️ 这些数字的适用范围**：客户端仍然是 Cocos（V8 / 各家小游戏 JS 引擎），所以**客户端侧的数字不受 Bun 影响**——Bun 的收益只落在服务端逻辑层。另外这是一台桌面机、跑几秒的稳态前数字，**长时间运行的内存/GC 稳态没测**（见 `protocol-map.md` §10）。
 
 > 方法论提醒：我们此前所有"实测-本机"都标注了 Node 18。运行时一换，这些数字就不再可比——所以本文的每个性能结论都必须带"运行在什么上"，这也是 §8.3 那条"三方字节一致"之类结论能跨运行时成立、而性能结论不能的原因。
+
+### 8.5 长跑稳态：Bun 连跑 60 分钟，三个判据全过
+
+**[实测-本机]** `spikes/aoi-tick/soak.mjs`（脚本与分析器都在仓库里，采样存 `.soak/*.jsonl`）。
+
+配置：Bun 1.4.5 · **2 场景 × 400 实体** · **20 Hz** · `Bun.zstd` 压缩 · 每 5 s 采样 · 共 **72,001 tick**（平均 20.0 tick/s，说明限速没有漂移）。
+
+每个 tick 做的是"一条真实逻辑服 tick + 一次网络往返"：积分 → 网格重建 → AOI 查询 → 列式打包，然后 protobuf SoA 编码 → zstd 往返 → 解码。**后三步是故意保留的分配源**——纯 SoA tick 零分配，测不出 GC 问题。
+
+**判据先写死，再看结果：**
+
+| # | 判据 | 实测 | |
+|---|---|---|---|
+| A | RSS 收敛（末 20% vs 首 20%，<10% 且 <32 MB） | 39.0 → 39.2 MB（+0.5%） | ✅ |
+| B | p99 不漂移（末 20% ≤ 首 20% × 1.5） | 0.378 → 0.354 ms | ✅ |
+| C | 末段斜率 < 0.5 MB/min | **0.019 MB/min** | ✅ |
+| D | 兜底：RSS > 1.5 GB 立即中止 | 未触发（峰值 44.2 MB） | ✅ |
+
+**每 5 分钟一档（12 档，节选）：**
+
+| 分钟段 | RSS 中位 | RSS 峰–谷 | heapUsed | p50 | p99 | 对象数 |
+|---|---:|---|---:|---:|---:|---:|
+| 0–5 | 38.7 MB | 37.5–41.5 | 2.30 MB | 0.240 | 0.354 | 17,727 |
+| 20–25 | 39.4 MB | 39.2–39.9 | 2.50 MB | 0.239 | 0.348 | 23,229 |
+| 25–30 | 39.7 MB | 39.3–40.8 | 2.60 MB | 0.239 | 0.356 | 25,302 |
+| 30–35 | 39.1 MB | 38.5–39.8 | 2.40 MB | 0.241 | 0.375 | 19,425 |
+| 45–50 | 38.9 MB | 38.4–40.9 | 2.40 MB | 0.242 | 0.367 | 19,214 |
+| 55–60 | 39.3 MB | 39.1–39.6 | 2.60 MB | 0.238 | 0.343 | 23,689 |
+
+全程线性拟合：RSS **0.0003 MB/min**、heapUsed 0.0026 MB/min、jscHeap 0.0025 MB/min——都在噪声里。
+
+#### 一个值得写下来的方法论：`objects` 上升 ≠ 泄漏
+
+采样里 `jscObjects` 从 1.7 万爬到 2.5 万，看着像慢泄漏。但它**是锯齿**：25–30 分钟到 25,302，30–35 分钟又回落到 19,425；后半小时的净变化是**负的**（−1,608），前半小时 +9,082。RSS 与 jscHeap 全程平。
+
+判定的办法是另写一个探针 [`spikes/aoi-tick/gc-settle.mjs`](../spikes/aoi-tick/gc-settle.mjs)：跑 30 s → 记数 → `Bun.gc(true)` → 再记，如此三轮：
+
+```
+初始                        objects=     0
+跑 30s                      objects=14,942
+强制 GC                     objects=14,510
+再跑 30s                    objects=14,673
+再强制 GC                   objects=14,510   ← 回到同一个值
+第三个 30s + GC             objects=14,509
+```
+
+**每次强制 GC 后都回到 14,510 ± 1**，所以活对象集合是恒定的，之前那些上升是**回收滞后的垃圾**。同一份数据里 `heapCapacity` 在两次 GC 之间从 2.6 MB 涨到 10.5 MB 再回落——RSS 的 ±2 MB 波动就来自这里，是 JSC 的"先让堆长大再收"策略，不是泄漏。
+
+> 这条可以直接当方法论用：**任何长跑里看到对象数/驻留内存缓涨，先做一次强制 GC 前后对比**。不去分辨"活的 vs 还没收的"，就会把健康程序判成泄漏，或者反过来把泄漏当噪声。
+
+#### 这个测试证明了什么、没证明什么
+
+**证明了**：JSC 在这个负载下 1 小时稳态成立；没有泄漏迹象；延迟不随时间漂移（p99 全程 0.34–0.38 ms）；限速准确（72,001 tick / 3600 s = 20.0/s）。
+
+**没证明**（别拿它当"Bun 能托管"的结论）：
+
+- 只有**一个进程**、没有真实网络与 DB，没有战斗判定/NPC AI 这些真正的 CPU 与分配大户；
+- 只跑了 **1 小时**，不是 24 小时——真实泄漏常常要到更久才显形；
+- 没测 `zstd-19`（快照档）的长跑，也没测多场景并发与多进程分片；
+- **客户端不受益**：这是服务端逻辑层的数，Cocos 客户端仍是 V8/各家 JS 引擎。
+
+#### 8.5.1 同负载三方对照：Node 18 / Bun（无压缩） / Bun（zstd）
+
+同一份 `soak.mjs`、同样的参数（2 场景 × 400 实体、20 Hz、实测都是 20.0 tick/s），三种跑法：
+
+| 指标 | Node 18（V8）· 无压缩 | **Bun · 无压缩** | Bun · zstd |
+|---|---:|---:|---:|
+| 时长 / tick 数 | 30 min / 36,001 | 10 min / 12,001 | 60 min / 72,001 |
+| **p50 tick** | 0.315–0.321 ms | **0.196–0.206 ms** | 0.233–0.243 ms |
+| **p99 tick** | 0.47–0.67 ms（个别窗口 0.9） | **0.25–0.41 ms** | 0.34–0.38 ms |
+| RSS 稳态（中位） | 55.8 MB | 39.6 MB | **39.2 MB** |
+| heapUsed（中位） | 10.4 MB | 2.4 MB | 2.4 MB |
+| heapTotal | 15–22 MB | 3.3–3.6 MB | 2.7–3.9 MB |
+| RSS 全程斜率 | 0.084 MB/min | 0.088 MB/min | 0.0003 MB/min |
+| 前/后半 RSS | +9.5 / −2.0 MB | +1.5 / −0.3 MB | +2.1 / −0.3 MB |
+| A/B/C 判据 | 全过 | 全过 | 全过 |
+
+**严格同构的那一对是前两列**（都不压缩）：**Bun 的 p50 快 37%（0.200 vs 0.318 ms），p99 快一倍以上（0.25–0.41 vs 0.47–0.67）**，同时 RSS 少 29%、heapUsed 少 77%。
+
+第三列给出另一个有用的数：**zstd 在 Bun 上值 38 µs/tick**（0.238 − 0.200），和我们 `compress-bench` 在 N=60 上测到的 53 µs（压缩 + 解压）同量级。也就是说压缩成本是"每 tick 的固定税"，付它的条件是**省下的带宽值这个价**。
+
+**两条比数字更值得记的：**
+
+1. **p99 的差距比 p50 重要。** 游戏服关心最坏那一 tick：Node 在 0.47–0.67 ms 之间来回跳（个别到 0.9），Bun 稳在 0.25–0.41。根源在 GC 形态——Node 的 `heapUsed` 在 6–14 MB 之间锯齿，Bun 几乎是一条平线（2.2–2.4 MB）；采样里能看到 Node 那些 0.9 ms 的窗口正好对应堆的陡降。
+2. **内存差在"一机多进程"时才发力。** 39.6 vs 55.8 MB、heapUsed 2.4 vs 10.4：按"每核一个逻辑进程"分片，8 核箱子上是 ~320 MB vs ~450 MB 的底噪差，且 V8 的锯齿意味着更高的突发峰值。
+
+> ⚠️ 关于**早期那组**（Bun 60 分钟带 zstd vs Node 30 分钟无 zstd）：那是不对称的，方向对 Bun 不利——Bun 多干一份压缩的活仍然更快更省。上面这张表用"Bun 无压缩"这一列把它补成了严格同构的对照。
 
 ---
 

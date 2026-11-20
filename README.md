@@ -11,8 +11,8 @@
 3. **验证协议文档**——把评估里无法靠文档回答的问题写成可执行的实验，**尚未执行**。
 4. **嵌入方案文档**——把 agent 做成"引擎的第三个前端"的具体实现设计：反射生成工具、命令总线、事务与 undo group、无头三级验证、投影、权限。它是主文档 §4.6 的下半身，也是唯一给出"自研引擎里怎么落地"的一份。
 5. **资产管线文档**——把 Rodin / Blender(ARP) / GenRA / MiniMax Music / LLM 这五类生成器接成一台"内容编译器"：四类资产四套契约、四条接缝的真实成本、五个子系统（契约 / DAG / 验证 / 缓存 / 账本）、三个尖峰实验。**它先纠正了三个范畴错误**：GenRA 是研究框架不是产品、Music 2.6 是音乐模型不是音效模型、Rodin 自己已经能绑定。
-6. **协议分工文档**——把 §8.2 的结论落到"哪条消息走哪个格式"：三档判据、链路与消息族清单、**4 字节帧头**（只做纯传输分帧：压缩位 + 长度；路由靠 gate 会话表、类型靠 RPC 信封的 `method`、配对靠 `req_id`）、压缩策略、P0–P4 分阶段与 13 条帧头验收测试。
-7. **服务器技术栈文档**——把一个"通用服务器引擎"的需求史（V1 选 C# → V3 帧同步作废 → V4 Cocos 为一等目标 → 定稿）与最终选型写定：**gate/dbproxy 用 Go、逻辑层用 TS `core`、热路径按 profile 下沉 Cython**。它是本仓库**第一份带实测的文档**：地板与天花板、TS 优化手法的收益排序、两条工具链断言（`erasableSyntaxOnly` / `package.json#imports`），以及一条能进 CI 的 RPC 类型断言。
+6. **协议分工文档**——把 §8.2 的结论落到"哪条消息走哪个格式"：三档判据、链路与消息族清单、**8 字节帧头**（`flags | len | ts`，只做纯传输分帧：压缩位 + 长度 + 发送时刻；路由靠 gate 会话表、类型靠 RPC 信封的 `method`、配对靠 `req_id`）、压缩策略、P0–P4 分阶段与 15 条帧头验收测试。
+7. **服务器技术栈文档**——把一个"通用服务器引擎"的需求史（V1 选 C# → V3 帧同步作废 → V4 Cocos 为一等目标 → 定稿）与最终选型写定：**gate/dbproxy 用 Go、逻辑层用 TS `core`、热路径按 profile 下沉 Cython**。它是本仓库**第一份带实测的文档**：地板与天花板、TS 优化手法的收益排序、工具链断言（`package.json#imports`；`erasableSyntaxOnly` 已被主动放弃，理由见 `protocol-map.md` §4.6.1），以及一条能进 CI 的 RPC 类型断言。
 
 ## 核心文档
 
@@ -21,7 +21,7 @@
 - **[`docs/ai-content-pipeline.md`](docs/ai-content-pipeline.md)** — 资产管线：Rodin Gen-2.5（含 2026-10 的 Rigging API，可直接出 UE5/Unity 绑定）、ARP 3.79.20（无头只能做重定向与导出，自动绑定无公开成功案例）、GenRA（USD 进 USD 出、不重定向、无 loop）、Music 2.6（5 分钟立体声、无音效/loop/分轨，且新用户已停开）；四条接缝、五个子系统、S1–S5 尖峰实验、经济性公式（分母是一次通过率）
 - **[`docs/mmorpg-engine-choice.md`](docs/mmorpg-engine-choice.md)** — Stride / Godot / Unity 在四个 MMORPG 硬缺口（网络、无缝大世界、AI、确定性）上的对照；§7「C# 约束下的候选集」（开源 + C# 的引擎只有 Stride 与 Godot，真正的 C# 优势在 Orleans 服务端）；§8「若服务端用 abelkhan」（abelkhan 经 API 核实：纯 C#、LGPL-2.1、gate+hub+protobuf，**传输只有 TCP/WebSocket**；以及由此得出的引擎判定）。全部事实标注【一手】/【否定性】/【未核实】
 - **[`docs/mmorpg-verification-plan.md`](docs/mmorpg-verification-plan.md)** — 四个必须先跑的验证实验（Stride `Null` 无头后端 / 资产分区加载与卸载 / 实体 churn 的 GC 代价 / QUIC-UDP 可达性与支持矩阵），含通过判据与"结果如何改写架构决策"
-- **[`docs/protocol-map.md`](docs/protocol-map.md)** — 协议分工（**v3**）：全部走 protobuf，热路径用 **SoA 布局**换速度而不是换格式（585 → 176 ns/实体；FB 剩下的优势只有 4 µs/帧 = 0.03% 帧预算）；压缩实测（zstd 后 FB 比 pb SoA 只差 **5%**，brotli 压缩率更好但 30 KB 要 **43 ms**，不可用）；**4 字节帧头**（`flags u8 + len u24`，语义全在 RPC `Envelope` 里）；P0–P4 路线与 13 条帧头验收测试；重新评估 FB 的量化触发
+- **[`docs/protocol-map.md`](docs/protocol-map.md)** — 协议分工（**v4**）：全部走 protobuf，热路径用 **SoA 布局**换速度而不是换格式（585 → 176 ns/实体；FB 剩下的优势只有 4 µs/帧 = 0.03% 帧预算）；压缩实测（zstd 后 FB 比 pb SoA 只差 **5%**，brotli 压缩率更好但 30 KB 要 **43 ms**，不可用）；**8 字节帧头**（`flags u8 + len u24 + ts u32`，语义全在 RPC `Envelope` 里；`ts` 是单调毫秒、逐跳覆盖、只做诊断）；P0–P4 路线与 15 条帧头验收测试；重新评估 FB 的量化触发
 - **[`docs/server-engine-stack.md`](docs/server-engine-stack.md)** — 服务端技术栈：需求 V1→V6 的收敛史、分层与"每层禁止做什么"、三条 CI 硬规矩；§3 是本机实测（纯 Python 比 V8 慢**约 80×**、天花板三方重合；TS 侧 序列化 **130×** > 遍历/分配 **7×** > 调用点 **5.2×** > 布局 **3.55×**）；§4 TS 工程纪律（擦除≠转换、ESM 无真热更）；§6 把它与 `mmorpg-engine-choice.md` §8 的 abelkhan 结论对齐（**§8 的前提已被改写**）；§7 十条未核实、§8 五个 spike（S1/S2 已执行）+ §8.3「TS 侧用哪个 protobuf 库」
 
 ### 文档的三个中心论点
@@ -80,10 +80,10 @@
 差别有两条写在该目录的 README 里：类型放 payload（不进帧头）、帧头与传输解耦。
 
 ```bash
-cd schema && ./check.sh     # protoc + protoc-gen-go + protoc-gen-es + methods.yaml → 常量，再跑 12 条结构断言
+cd schema && ./check.sh     # protoc + protoc-gen-go + protoc-gen-es + methods.yaml → 常量，再跑 14 条结构断言
 ```
 
-`schema/methods.yaml` 是 method code 的唯一分配表（本期只登记框架面 `0x00xx–0x0Cxx`）。
+`schema/methods.yaml` 是 method code 的唯一分配表（本期只登记框架面 `0x00xx–0x0Cxx`）；`msg_type` 的权威定义是 `envelope.proto` 里的 `MsgType` enum。
 
 ### 另一处例外：`spikes/`
 

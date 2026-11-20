@@ -272,7 +272,8 @@ function finish(reason) {
   const rt = typeof Bun !== 'undefined' ? `Bun ${Bun.version}` : `Node ${process.version}`;
   const summary = {
     runtime: rt,
-    minutes: MINUTES, hz: HZ, scenes: SCENES, entities: SCENES * ENTITIES,
+    minutes: MINUTES, hz: HZ, scenes: SCENES,
+    entitiesPerScene: ENTITIES, entities: SCENES * ENTITIES,
     zstd: zstd ? zstd.name : null,
     reason,
     samples: samples.length,

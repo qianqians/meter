@@ -13,6 +13,8 @@
 
 version: 1
 
+# msg_type 的**权威定义在 schema/pb/envelope.proto 的 MsgType enum**。
+# 这里只是镜像，供 gen-methods.mjs 校验每个 method 的 msg_type 拼写是否合法。
 msg_types:
   MSG_NONE: 0
   MSG_REQUEST: 1
