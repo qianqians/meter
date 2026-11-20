@@ -89,6 +89,11 @@ message GateForwardHubCallClient {
   string conn_id = 1;
   string entity_id = 2;
   bytes content = 3;
+
+  // **业务方法名**（"entity.attack"）。外层 Envelope.method 装的是路由方法
+  // （"gate.forwardHubCallClient"），因为 gate 得先知道 body 是什么类型才能路由；
+  // 真正要展示给客户端的那个方法名放这里，gate 原样放进下发的 Envelope.method。
+  string method = 4;
 }
 
 // hub → gate → 客户端：**组播**，一次发给多条连接。
@@ -99,6 +104,9 @@ message GateForwardHubCallGroup {
   repeated string conn_id = 1;
   string entity_id = 2;
   bytes content = 3;
+
+  // 业务方法名（同 GateForwardHubCallClient.method）。
+  string method = 4;
 }
 
 // hub → gate → 客户端：**广播**，发给所有在线连接。
@@ -108,6 +116,9 @@ message GateForwardHubCallGroup {
 message GateForwardHubCallGlobal {
   string entity_id = 1;
   bytes content = 2;
+
+  // 业务方法名（同 GateForwardHubCallClient.method）。
+  string method = 3;
 }
 
 // ---------------------------------------------------------------------------

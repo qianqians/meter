@@ -106,8 +106,9 @@ cd ../gate && go build ./... && go test ./... && go run ./cmd/gate -listen :9001
 
 - **8 字节帧头**与 `core/src/frame.ts` **逐字节一致**（`golden_test.go` 里钉了黄金向量）
 - **会话表**：`conn → (user, entity, node)` 与 `entity → conn` 双向；同实体被新连接绑走时返回旧会话由 gate 踢掉
-- **分派骨架**：`client.login`（占位实现）、其它 REQUEST 回 `NOT_FOUND`、`len==0` 当 ping
-- 已冒烟：Python 手工造帧 → 真实 TCP → 收到 `LoginResult` 回包
+- **两个监听端口**：对外 WebSocket（客户端）、对内 TCP（逻辑节点连入，首帧 `logic.hello`）
+- **hub 路由**：上行包成 `ClientRequestHub/NotifyHub/ResponseHub`，下行把 `Hub*` / `GateForwardHub*` 译成客户端消息；组播按连接去重、广播遍历
+- 已冒烟（`gate/scripts/smoke.py`，零依赖）：两个端口 → 建会话 → 上行转发 → 逻辑层调客户端 → 踢人，六步全过
 
 ### 另一处例外：`spikes/`
 

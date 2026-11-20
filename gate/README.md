@@ -1,73 +1,88 @@
 # gate —— 接入层（Go）
 
-P0 骨架：**能起来、能切帧、能建会话、能回包**，还没接逻辑层。
+**两个监听端口**：对外 WebSocket（客户端），对内 TCP（逻辑节点连入）。P0 骨架：能起来、能切帧、能建会话、能双向转发。
+
+```
+客户端 ──WebSocket(:9001/ws)──►  gate  ──TCP(:9002)──►  逻辑层
+                                  │
+                          session 表（conn ⇄ entity）+ hub 路由
+```
 
 ## 结构
 
 ```
 gate/
-  cmd/gate/main.go           进程入口：TCP 监听、读写循环、method 分派、登录占位、踢人
-  internal/frame/            8 字节帧头编解码（**与 core/src/frame.ts 逐字节一致**，有黄金向量测试）
-  internal/frame/golden_test.go
-  internal/session/          会话表：conn ⇄ entity 双向路由 + 组播按连接去重
-  internal/pb/               codegen 产物（gitignored，cd schema && ./check.sh 生成）
+  cmd/gate/main.go          两个监听端口的装配与优雅退出
+  internal/clientgate/      对外 WebSocket 接入（gorilla/websocket）
+  internal/logiclink/       对内 TCP 接入（逻辑节点连进来）
+  internal/hub/             **中央路由**：客户端 ⇄ 逻辑层、组播去重、广播、踢人
+  internal/session/         会话表：conn → (user, entity, node) / entity → conn
+  internal/frame/           8 字节帧头（与 core/src/frame.ts 逐字节一致）
+  internal/pb/              codegen 产物（gitignored）
+  scripts/smoke.py          端到端冒烟（零依赖，含手写 WebSocket 客户端）
 ```
 
 ## 跑
 
 ```bash
-cd schema && ./check.sh      # 生成 gate/internal/pb 与 core/src/gen
+cd schema && ./check.sh        # 生成 gate/internal/pb 与 core/src/gen
 cd ../gate
-go build ./...               # 或 go build -o gate.exe ./cmd/gate
-go test ./...                # frame / session 两个包
-go run ./cmd/gate -listen :9001
+go build ./... && go test ./...
+go run ./cmd/gate -client :9001 -logic :9002 -ws-path /ws
 ```
 
-冒烟（用 Python 手工造一个 `client.login` 帧，不需要任何依赖）：
+端到端冒烟（两个端口一起验）：
 
 ```bash
-python -c "
-import socket,struct
-def varint(n):
-    o=b''
-    while True:
-        b=n&0x7f; n>>=7; o+=bytes([b|(0x80 if n else 0)])
-        if not n: return o
-def s(f,v): return varint((f<<3)|2)+varint(len(v))+v
-env = varint(8)+varint(1) + s(2,b'client.login') + varint(24)+varint(1) + s(4, s(1,b'tk'))
-frame = b'\x00' + struct.pack('<I',len(env))[:3] + struct.pack('<I',0) + env
-c = socket.create_connection(('127.0.0.1',9001)); c.sendall(frame); print(c.recv(4096).hex())
-"
-# 回来的是 Envelope{RESPONSE, method=client.login, callback_id=1, body=LoginResult{...}}
+go run ./cmd/gate -client :19101 -logic :19102 &
+python3 scripts/smoke.py 127.0.0.1 19101 19102
 ```
 
-## 已实现
-
-| 项 | 说明 |
-|---|---|
-| 8 字节帧头 | `flags:zstd | len:u24 | ts:u32`；半包不报错、未知 flags 位断开、`len>1MB` 拒绝 |
-| 延迟统计 | `frame.OneWayDelayMs()`：有符号 32 位差值处理 49.7 天回绕，异常时钟 clamp + 记日志 |
-| 会话表 | 正向 `conn→(user,entity,node)`、反向 `entity→conn`；**同实体被新连接绑走时返回旧会话**，由 gate 踢掉 |
-| 组播寻址 | `ConnsOfEntities()`：实体名单 → 连接名单，**按连接去重**，未知实体忽略 |
-| 分派骨架 | `Envelope` → `client.login`（占位：token 当 user_id）、其它 REQUEST 回 `NOT_FOUND`、NOTIFY 丢弃 |
-| 保活 | `len==0` 的帧原样回一个空帧（最省的心跳） |
-| 退出 | SIGINT/SIGTERM 优雅关闭监听 |
-
-## 还没做（按优先级）
-
-1. **真转发到逻辑层**：consul 查 `logic` 节点 → 连接池 → 把 `ClientRequestHub{conn_id, entity_id, content}` 发过去；回程把 `GateForwardHubCall*` 译成 `CallEntity` 下发
-2. **WebSocket / TLS**：小游戏渠道只能 WSS，`net.Conn` 要换适配层
-3. **压缩**：帧头 `flags` 的 zstd 位已留好，读写两端都还没接
-4. **限流与背压**：每连接帧率/字节率、写缓冲上限
-5. **`Hub*` 系列消息的处理**：实体创建/删除/刷新、`GateForwardHubCallClient/Group/Global` 的下发
-6. 压测：S4（10 万连接）用的就是这个骨架，目前每连接一个 goroutine + 32 KB 读缓冲
-
-## 与 TS 侧的一致性
-
-`internal/frame/golden_test.go` 钉了一个黄金向量：
+输出：
 
 ```
-encodeFrame({flags:0, ts:123456, payload:[9,8,7]}) === 0003 0000 40e20100 090807
+① 两个端口都连上了（TCP 逻辑链路 + WebSocket 客户端）
+② gate 把未登录连接的请求**丢弃**了
+③ 客户端收到建实体推送: {'method': 'client.createPlayerEntity', 'entity': 'e-smoke'}
+④ 建会话后 gate 转发 ClientRequestHub: {'conn': 'c-1', 'entity': 'e-smoke', 'method': 'entity.attack', 'callback': 7}
+⑤ 逻辑层调客户端，客户端收到: {'method': 'entity.attack', 'entity': 'e-smoke', 'content': '0909', 'callback': 11}
+⑥ 踢人: 收到 KickOff
+冒烟通过 ✅
 ```
 
-两端任何一侧改了帧头布局，这个测试会先失败。
+## 两个端口为什么这样分工
+
+| | 对外 WebSocket | 对内 TCP |
+|---|---|---|
+| 谁连过来 | 客户端连 gate | **逻辑节点连 gate** |
+| 为什么 | 小游戏 / H5 只能 `new WebSocket`，多数渠道只能 WSS | 内网长连接，没有浏览器限制，裸 TCP 更省 |
+| 握手 | HTTP Upgrade；准入在 `client.login`（token）里做 | 首帧必须是 `logic.hello`，body 是 node_id |
+
+**逻辑层主动连入**（而不是 gate 去连）是有意的：gate 是对外的一层，扩容 / 滚动发布时不该要求逻辑层改配置。
+
+## 路由规则（`internal/hub`）
+
+| 方向 | 输入 | 输出 |
+|---|---|---|
+| 客户端 → 逻辑 | `Envelope{REQUEST/NOTIFY, method, body=CallEntity}` | `ClientRequestHub` / `ClientNotifyHub{conn_id, entity_id, content}` |
+| 客户端 → 逻辑（响应） | `Envelope{RESPONSE}` | `ClientResponseHub{entity_id, error, content}` |
+| 逻辑 → 客户端（调用） | `GateForwardHubCallClient/Group/Global` | `Envelope{method=业务方法名, body=CallEntity/CallGlobal}` |
+| 逻辑 → 客户端（视图） | `HubCreatePlayerEntity/CreateRemoteEntity/DeleteRemoteEntity/RefreshEntity` | `client.createPlayerEntity` 等固定方法名 |
+| 逻辑 → gate（踢人） | `HubKickOffClient{conn_id, error, prompt_info}` | `KickOff` 后关闭（`SendAndClose`，尽量不留关闭竞态） |
+
+**gate 不解 `content`**：它只读 `entity_id` / `conn_id` 用于寻址，`content` 原样搬。唯一的翻译是"内部消息 → 客户端消息"这一层包装。
+
+## 已验证（`go test ./...` + 冒烟）
+
+- `frame`：往返、半包、未知 flags 位、`ts` 跨 32 位回绕、异常时钟 clamp、**与 TS 侧逐字节一致的黄金向量**
+- `session`：绑定/解绑、同实体被新连接接管时返回旧会话、改绑、组播按连接去重
+- `hub`：上行转发字段正确、未登录丢弃并计数、`CallClient` 投递（业务方法名透传）、组播去重、广播、建实体时踢掉旧连接、坏信封计数
+- 冒烟：**真实 TCP + 真实 WebSocket**，六步全过
+
+## 还没做
+
+1. 真按 `entity → node` 选逻辑节点（现在 P0 是"任取一个"）
+2. 压缩（帧头 `flags` 的 zstd 位留好了，两端都没接）
+3. 限流与背压、写缓冲上限
+4. TLS（WSS 需要证书；现在只有明文 WS）
+5. 压测（S4：10 万连接，现在每连接一个 goroutine + 32 KB 读缓冲）
