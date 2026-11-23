@@ -3,11 +3,11 @@
 本目录是本仓库**第一批真正的工程产物**：`schema/pb/*.proto` 是服务端框架面的协议定义，
 `.proto` **只描述消息**——方法名不在 schema 里，类型绑定在业务侧的 `RpcMap`（见 §4）。
 
-**状态：框架协议 v1 定稿（2026-11-20）**。**7 个 proto**、`./check.sh` **11 条断言全绿**；业务消息按需求暂不生成。
+**状态：框架协议 v1 定稿（2026-11-23 收敛后）**。**7 个 proto / 43 条消息**、`./check.sh` **11 条断言全绿**；业务消息按需求暂不生成。
 
 范围纪律（按需求："先生成底层框架上的协议，功能相关的先不生成"）：
 
-- ✅ 连接、会话、路由、投递、存储访问（**在 hub 内部，不是独立进程**）、节点发现、实体迁移、频道扇出
+- ✅ 连接、会话、路由、投递、跨实体调用、存储访问（**在 hub 内部，不是独立进程**）
 - ❌ 背包 / 任务 / 战斗 / 商城 / 社交 / 排行 等**业务消息一律不在本目录**
 
 业务域以后按 `schema/pb/<域>.proto` 往上加，只管消息。
@@ -77,7 +77,7 @@ schema/
     client.proto          客户端消费的：NotifyConnID/LoginResult/实体/踢人/公告 + CallGlobal（CallEntity 在 common）
     gate_logic.proto      logic → gate（Hub* 维护状态 / GateForwardHub* 转发给客户端）
     logic_gate.proto      gate → logic（客户端上行投递 / 断线 / 重连 / 服务级请求）
-    logic_logic.proto     logic ⇄ logic（迁移 / 跨调用 / 频道；**服务发现交给 consul**）
+    logic_logic.proto     logic ⇄ logic（**只剩跨实体调用**；迁移与频道广播已删）
   check.sh                codegen + 结构校验（一条命令）
   verify.mjs              11 条结构断言
 ```
@@ -165,3 +165,4 @@ cd schema
 | 日期 | 变更 | 原因 |
 |---|---|---|
 | 2026-11-20 | **删除 `logic_dbproxy.proto`（17 条存储原语）** | **数据落地放 hub**：逻辑层直接写存储，不再有独立的 dbproxy 进程。存储原语的语义（不透明 key/value、`expect_version` 乐观锁、批量非事务）下沉为 hub 内部的一个存储模块，不再是跨进程协议 |
+| 2026-11-23 | **`logic_logic.proto` 删到只剩 `CrossCallRequest`** | 实体迁移改成"原节点落库 → 新节点按 key 重新加载"（不搬状态字节）；频道广播交给各 hub 自己按订阅扇出，不再占框架协议 |

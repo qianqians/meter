@@ -88,6 +88,9 @@ func TestRegisterSendsServiceAndTTLCheck(t *testing.T) {
 	if check["CheckID"] != "service:gate-1" || check["TTL"] != "30s" {
 		t.Fatalf("TTL 检查不对: %+v", check)
 	}
+	if _, hasHTTP := check["HTTP"]; hasHTTP {
+		t.Fatal("注册体里不应出现 HTTP check（gate 主动 push，不靠 consul 反向拨入）")
+	}
 	meta, _ := got["Meta"].(map[string]any)
 	if meta["logic_port"] != "9002" {
 		t.Fatalf("Meta 未带上: %+v", meta)
@@ -164,11 +167,15 @@ func TestNopIsInert(t *testing.T) {
 }
 
 func TestDefaultServiceID(t *testing.T) {
-	cases := []struct{ addr string; port int; want string }{
+	cases := []struct {
+		addr string
+		port int
+		want string
+	}{
 		{"10.0.0.11", 9001, "gate-10.0.0.11-9001"},
 		{"127.0.0.1", 19211, "gate-127.0.0.1-19211"},
-		{"fe80::1", 9001, "gate-fe80--1-9001"},   // IPv6 的冒号被换掉
-		{"[::1]", 9001, "gate---1-9001"},          // 方括号去掉，冒号换 -
+		{"fe80::1", 9001, "gate-fe80--1-9001"}, // IPv6 的冒号被换掉
+		{"[::1]", 9001, "gate---1-9001"},       // 方括号去掉，冒号换 -
 	}
 	for _, c := range cases {
 		if got := DefaultServiceID(c.addr, c.port); got != c.want {

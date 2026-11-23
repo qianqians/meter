@@ -27,9 +27,9 @@ type Info struct {
 	ID      string            // 唯一名，例如 "gate-1"
 	Name    string            // 服务名，例如 "gate"
 	Address string            // 对客户端可达的地址
-	Port    int               // 对外 WebSocket 端口
-	Tags    []string          // ["gtag", "ws"]
-	Meta    map[string]string // 版本、区服、对内端口等
+	Port    int               // 注册的端口（gate 用**对内 TCP**端口）
+	Tags    []string          // ["gate", "internal"]
+	Meta    map[string]string // 版本、客户端端口、ws_path 等
 }
 
 // Registry 抽象出来，方便单测替换成假的。
@@ -49,10 +49,10 @@ func (Nop) Deregister(context.Context) error       { return nil }
 
 // Consul 是 HTTP 实现。baseURL 形如 "http://127.0.0.1:8500"。
 type Consul struct {
-	baseURL string
-	http    *http.Client
+	baseURL   string
+	http      *http.Client
 	serviceID string
-	ttl     time.Duration
+	ttl       time.Duration
 }
 
 func NewConsul(baseURL, serviceID string, ttl time.Duration) *Consul {
@@ -67,6 +67,15 @@ func NewConsul(baseURL, serviceID string, ttl time.Duration) *Consul {
 // checkID 是 consul 里这条 TTL 检查的 id（"service:<serviceID>" 是社区惯用写法）。
 func (c *Consul) checkID() string { return "service:" + c.serviceID }
 
+// Register 注册服务 + **一条 TTL 健康检查**。
+//
+// 为什么是 gate 主动 push（TTL）而不是让 consul 来拉（HTTP check）：
+//   · gate 常部署在 NAT / 安全组后面，**consul 反向拨入 gate 的健康端口不一定通**，
+//     而 gate → consul 的 8500 是必通的（不然连注册都做不到）；
+//   · 主动 push 顺带把状态塞进 `?note=`（一次请求干两件事），少一个监听端口、少一套防火墙规则；
+//   · 代价是"进程僵死但上报线程还在跑"骗过 consul —— 这靠两点兜：
+//     ① 上报线程自己也检查关键依赖（逻辑节点是否还在），② 真僵死时 gate 自己的
+//     WebSocket 读写循环也早就停了，玩家侧会先暴露问题。
 func (c *Consul) Register(ctx context.Context, info Info) error {
 	body := map[string]any{
 		"ID":      c.serviceID,
@@ -85,6 +94,8 @@ func (c *Consul) Register(ctx context.Context, info Info) error {
 	return c.putJSON(ctx, "/v1/agent/service/register", body)
 }
 
+// UpdateStatus 既是 TTL 心跳，也是状态上报（`?note=` 会显示在 consul UI 上）。
+// 调用间隔必须小于 TTL，否则节点会被判 critical（config.Validate 已强制）。
 func (c *Consul) UpdateStatus(ctx context.Context, note string) error {
 	// note 会显示在 consul UI 与 /v1/health 输出里；截断一下，避免超长
 	if len(note) > 200 {

@@ -16,6 +16,7 @@ gate/
   internal/clientgate/      对外 WebSocket 接入（gorilla/websocket）
   internal/logiclink/       对内 TCP 接入（逻辑节点连进来）
   internal/hub/             **中央路由**：客户端 ⇄ 逻辑层、组播去重、广播、踢人
+  internal/config/          **JSON 配置**：默认值、注释键剥离、校验、地址/时长换算（14 条测试）
   internal/registry/        **consul**：服务注册 / TTL 心跳 / 状态上报 / 注销（不引 SDK，直接打 HTTP API）
   internal/session/         会话表：conn → (user, entity, node) / entity → conn
   internal/frame/           8 字节帧头（与 core/src/frame.ts 逐字节一致）
@@ -29,14 +30,56 @@ gate/
 cd schema && ./check.sh        # 生成 gate/internal/pb 与 core/src/gen
 cd ../gate
 go build ./... && go test ./...
-go run ./cmd/gate -client :9001 -logic :9002 -ws-path /ws
+go run ./cmd/gate -dump-config > config.json    # 生成带注释的配置（= 默认值）
+# 改完再启动：
+go run ./cmd/gate -config config.json
 ```
+
+不带 `-config` 时全用内置默认值（`:9002` 对内 / `:9001/ws` 对外 / consul 关闭），
+启动日志第一行会把生效的配置打出来：
+
+```
+配置：config.json（对内 0.0.0.0:9002 ｜ 对外 0.0.0.0:9001/ws ｜ consul true）
+```
+
+## 配置（`config.json`）
+
+**配置的唯一文档是 `internal/config/config.go` 的结构体**（字段注释 + `Default()`）——
+没有单独的 example 文件，免得两份漂移。想要一份能改的配置就跑：
+
+```bash
+gate -dump-config > config.json
+```
+
+输出就是当前生效的配置，带 `//xxx` 说明键，且**能被自己读回**（有往返测试）。
+
+| 段 | 字段 | 说明 |
+|---|---|---|
+| `node` | `id` / `hostname` | `id` 留空则推导成 `gate-<ip>-<对内端口>` |
+| `listen` | `logic_host` / `logic_port` | **对内 TCP**：逻辑节点连入 |
+| | `client_host` / `client_port` / `ws_path` | **对外 WebSocket** |
+| | `tls_cert_file` / `tls_key_file` | 两者必须同时给或同时留空；空 = 明文 WS |
+| | `max_frame_bytes` / `read_timeout_s` | 单帧上限（≤16 MB，帧头 u24）与读超时 |
+| `advertise` | `ip` | 注册到 consul 的地址；留空则探测（见下） |
+| `consul` | `enabled` / `url` | 关闭时下面几项忽略 |
+| | `ttl_s` / `report_interval_s` | **必须满足 report < ttl**，否则启动就报错；`report_interval_s` 就是"每多少秒上报一次" |
+| | `tags` | 注册时带的 tags |
+| `redis` | `cache_url` / `mq_url` | **缓存**与**消息队列**分开两个库，便于按需扩容/隔离 |
+| | `pool_size` / `dial_timeout_ms` | 连接池与建连超时 |
+| `log` | `dir` / `file_name` | `file_name` 支持 `%Y%m%d%H`；空则只打 stderr |
+| | `level` / `max_size_mb` / `keep_days` | 级别与轮转 |
+
+**JSON 里怎么写注释**：键名以 `//` 开头的字段会被解析时丢掉（例如 `"//client": "对外 WS"`），
+所以配置文件自己带说明，不用再维护一份字段表。
+
+**校验只拦明显矛盾**（`internal/config.Validate`）：同地址同端口、只给证书不给私钥、
+`report_interval_s >= ttl_s`、端口越界、`max_frame_bytes` 超过 16 MB——不做风格检查。
 
 端到端冒烟（两个端口一起验）：
 
 ```bash
-go run ./cmd/gate -client :19101 -logic :19102 &
-python3 scripts/smoke.py 127.0.0.1 19101 19102
+go run ./cmd/gate -config /tmp/gate-test.json &
+python3 scripts/smoke.py 127.0.0.1 19301 19302
 ```
 
 输出：
@@ -53,15 +96,34 @@ python3 scripts/smoke.py 127.0.0.1 19101 19102
 
 ## consul：注册 + 状态上报
 
-```bash
-go run ./cmd/gate -client :9001 -logic :9002   -consul http://127.0.0.1:8500 -node-id gate-1 -advertise 10.0.0.11   -consul-ttl 30s -report-every 10s
+在 `config.json` 里把 `consul.enabled` 设为 `true` 并填好 `consul.url` 即可：
+
+```json
+{ "consul": { "enabled": true, "url": "http://127.0.0.1:8500",
+              "ttl_s": 30, "report_interval_s": 10,
+              "tags": ["gate", "internal"] } }
 ```
 
 | 时刻 | 动作 | 落到 consul |
 |---|---|---|
 | 启动 | `PUT /v1/agent/service/register` | 服务 `gate`、**对内端口**、tags、meta（版本 / 客户端端口 / ws_path）+ **一条 TTL 健康检查** |
-| 每 10s | `PUT /v1/agent/check/pass/service:<id>?note=…` | **既是心跳，也是状态上报**：`clients=42 logic=1 up=12000 down=8000 miss=3 kicks=1 bad=0` |
+| **注册后立刻 + 每 N 秒** | `PUT /v1/agent/check/pass/service:<id>?note=…` | **状态上报，同时就是 TTL 心跳**：`clients=42 logic=1 up=812/s down=640/s miss=3 kicks=1 bad=0` |
 | 退出 | `PUT /v1/agent/service/deregister/<id>` | 主动摘掉，不用等 TTL 过期变 critical |
+
+N = `consul.report_interval_s`（默认 10s）。两条纪律：
+
+1. **注册完立刻报一次**——TTL 从注册那一刻开始计时，等一个周期再报会让节点短暂 critical；
+2. **N 必须小于 `ttl_s`**（`config.Validate` 强制），且单次上报带 3s 超时，consul 慢不会拖住上报线程。
+
+上报的是**速率**而不是累计计数：`up=812/s` 才能看出"现在忙不忙"，累计值只能看出跑了多久。
+
+### 为什么是 gate 主动 push（TTL），而不是让 consul 来拉
+
+| 理由 | 说明 |
+|---|---|
+| **网络方向** | gate 常在 NAT / 安全组后面，**consul 反向拨入 gate 不一定通**；而 gate → consul:8500 必通（否则连注册都做不到） |
+| **一次请求干两件事** | TTL 的 `?note=` 直接带状态，不用额外开端口、不用加防火墙规则 |
+| **失败模式** | TTL 的弱点是"进程僵死但上报线程还在跑"会骗过 consul——但真僵死时 WebSocket 读写循环也早停了，**玩家侧会先暴露** |
 
 ### 服务 id 与注册地址：**默认带 IP**
 

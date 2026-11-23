@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"meter/gate/internal/clientgate"
+	"meter/gate/internal/config"
 	"meter/gate/internal/hub"
 	"meter/gate/internal/logiclink"
 	"meter/gate/internal/registry"
@@ -32,18 +33,24 @@ import (
 )
 
 func main() {
-	clientAddr := flag.String("client", ":9001", "对外 WebSocket 监听地址（客户端）")
-	logicAddr := flag.String("logic", ":9002", "对内 TCP 监听地址（逻辑节点连入）")
-	wsPath := flag.String("ws-path", "/ws", "WebSocket 路径")
-
-	// consul：留空 = 不注册（本地开发）。注册后由 consul 负责服务发现与健康检查，
-	// gate 每次上报状态同时充当 TTL 心跳。
-	consulURL := flag.String("consul", "", "consul HTTP 地址，例如 http://127.0.0.1:8500；留空不注册")
-	nodeID := flag.String("node-id", "", "本节点 id（consul 里的唯一名），空则用主机名+端口")
-	advertise := flag.String("advertise", "", "对客户端可达的地址（注册到 consul）；空则用 -client 的 host")
-	ttl := flag.Duration("consul-ttl", 30*time.Second, "consul TTL 健康检查的过期时间")
-	reportEvery := flag.Duration("report-every", 10*time.Second, "状态上报/心跳间隔（必须小于 ttl）")
+	cfgPath := flag.String("config", "", "配置文件（JSON）；留空则全用默认值")
+	dumpConfig := flag.Bool("dump-config", false, "把当前生效的配置（含注释与默认值）打印到 stdout 后退出；可配合 -config 打开已有配置")
 	flag.Parse()
+
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		log.Fatalf("配置错误: %v", err)
+	}
+	if *dumpConfig {
+		out, err := cfg.Dump()
+		if err != nil {
+			log.Fatalf("生成配置失败: %v", err)
+		}
+		fmt.Println(string(out))
+		return
+	}
+	log.Printf("配置：%s（对内 %s ｜ 对外 %s%s ｜ consul %v）",
+		orDefault(*cfgPath, "<默认>"), cfg.LogicAddr(), cfg.ClientAddr(), cfg.Listen.WSPath, cfg.Consul.Enabled)
 
 	startedAt := time.Now()
 	nowMs := func() uint32 { return uint32(time.Since(startedAt).Milliseconds()) }
@@ -53,31 +60,33 @@ func main() {
 
 	// ---------- consul 注册与状态上报 ----------
 	var reg registry.Registry = registry.Nop{}
-	if *consulURL != "" {
-		addr := advertiseAddr(*advertise, *clientAddr)
-		logicPort := portOf(*logicAddr)
-		clientPort := portOf(*clientAddr)
+	if cfg.Consul.Enabled {
+		addr := advertiseAddr(cfg.ClientAddr())
+		logicPort := cfg.Listen.LogicPort
+		clientPort := cfg.Listen.ClientPort
 
-		id := *nodeID
+		id := cfg.Node.ID
 		if id == "" {
 			// 默认 `gate-<ip>-<对内端口>`：多机部署时 hostname 往往是随机串，IP 才认得出是哪个节点
 			id = registry.DefaultServiceID(addr, logicPort)
 		}
-		reg = registry.NewConsul(*consulURL, id, *ttl)
+		reg = registry.NewConsul(cfg.Consul.URL, id, cfg.ConsulTTL())
+
+		// consul 用 TTL check：gate 自己 push 心跳 + 状态（见 registry.Register 的注释）
 		log.Printf("注册信息：id=%s addr=%s logic_port=%d client_port=%d", id, addr, logicPort, clientPort)
 
 		regCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		err := reg.Register(regCtx, registry.Info{
+		err = reg.Register(regCtx, registry.Info{
 			Name: "gate",
 			// **注册的是对内端口**：consul 的消费方是逻辑层，它要连的是 gate 的 internal TCP；
 			// 客户端用的 WebSocket 端口放在 Meta 里（client_port），由网关侧配置或运营下发。
 			Address: addr,
 			Port:    logicPort,
-			Tags:    []string{"gate", "internal"},
+			Tags:    cfg.Consul.Tags,
 			Meta: map[string]string{
 				"version":     "0.1.0",
 				"client_port": strconv.Itoa(clientPort),
-				"ws_path":     *wsPath,
+				"ws_path":     cfg.Listen.WSPath,
 			},
 		})
 		cancel()
@@ -85,22 +94,22 @@ func main() {
 			log.Printf("consul 注册失败（继续运行，只是发现不到）: %v", err)
 			reg = registry.Nop{}
 		} else {
-			log.Printf("已注册到 consul：%s（TTL %s）", id, *ttl)
+			log.Printf("已注册到 consul：%s（TTL %s）", id, cfg.ConsulTTL())
 		}
 	}
 
 	// ---------- 对外：WebSocket ----------
-	ws := clientgate.New(h, *wsPath, nowMs)
-	httpSrv := &http.Server{Addr: *clientAddr, Handler: ws.Handler()}
+	ws := clientgate.New(h, cfg.Listen.WSPath, nowMs)
+	httpSrv := &http.Server{Addr: cfg.ClientAddr(), Handler: ws.Handler()}
 
 	// ---------- 对内：TCP ----------
-	logicLn, err := net.Listen("tcp", *logicAddr)
+	logicLn, err := net.Listen("tcp", cfg.LogicAddr())
 	if err != nil {
 		log.Fatalf("逻辑端口监听失败: %v", err)
 	}
 	ll := logiclink.New(h, nowMs)
 
-	log.Printf("gate 启动：客户端 WS %s%s ｜ 逻辑层 TCP %s", *clientAddr, *wsPath, *logicAddr)
+	log.Printf("gate 启动：客户端 WS %s%s ｜ 逻辑层 TCP %s", cfg.ClientAddr(), cfg.Listen.WSPath, cfg.LogicAddr())
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -117,21 +126,45 @@ func main() {
 			}
 		}
 	}()
-	go func() { // 状态上报：既打日志，也作为 consul TTL 心跳
-		t := time.NewTicker(*reportEvery)
+	// ---------- 状态上报：每 N 秒 push 一次（同时是 consul 的 TTL 心跳） ----------
+	//
+	// 两条纪律：
+	//   ① **注册完立刻报一次**——TTL 从注册那刻开始计时，等一个周期再报会让节点短暂 critical；
+	//   ② 上报间隔必须小于 TTL（config.Validate 已强制），且单次上报带 3s 超时，
+	//      避免 consul 慢拖住上报线程。
+	go func() {
+		t := time.NewTicker(cfg.ReportInterval())
 		defer t.Stop()
+
+		prev := h.Stats()
+		prevAt := time.Now()
+		report := func() {
+			s := h.Stats()
+			now := time.Now()
+			secs := now.Sub(prevAt).Seconds()
+			if secs <= 0 {
+				secs = 1
+			}
+			upRate := float64(s.ClientFrames-prev.ClientFrames) / secs
+			downRate := float64(s.ForwardedDown-prev.ForwardedDown) / secs
+			prev, prevAt = s, now
+
+			note := statusLine(h, upRate, downRate)
+			log.Print(note)
+			ctx2, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			if err := reg.UpdateStatus(ctx2, note); err != nil {
+				log.Printf("consul 状态上报失败: %v", err)
+			}
+			cancel()
+		}
+
+		report() // ① 立即报一次
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				note := statusLine(h)
-				log.Print(note)
-				upCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-				if err := reg.UpdateStatus(upCtx, note); err != nil {
-					log.Printf("consul 状态上报失败: %v", err)
-				}
-				cancel()
+				report()
 			}
 		}
 	}()
@@ -150,27 +183,28 @@ func main() {
 	os.Exit(0)
 }
 
-// statusLine 是上报给 consul（以及日志）的一行状态。刻意保持人能读：
-//   clients=42 logic=1 up=12000 down=8000 miss=3 kicks=1
-func statusLine(h *hub.Hub) string {
+// statusLine 是上报给 consul（以及日志）的一行状态，刻意保持人能读：
+//
+//	clients=42 logic=1 up=812/s down=640/s miss=3 kicks=1 bad=0
+//
+// 给的是**速率**而不是累计计数：consul UI 上看到 "up=812/s" 才知道现在忙不忙，
+// 累计值只能看出"跑了多久"。
+func statusLine(h *hub.Hub, upRate, downRate float64) string {
 	s := h.Stats()
-	return fmt.Sprintf("clients=%d logic=%d up=%d down=%d miss=%d kicks=%d bad=%d",
-		h.ClientCount(), h.LogicCount(), s.ClientFrames, s.ForwardedDown, s.UnknownClient, s.Kicks, s.BadEnvelope)
+	return fmt.Sprintf("clients=%d logic=%d up=%.0f/s down=%.0f/s miss=%d kicks=%d bad=%d",
+		h.ClientCount(), h.LogicCount(), upRate, downRate, s.UnknownClient, s.Kicks, s.BadEnvelope)
 }
 
 // advertiseAddr 决定注册到 consul 的地址，优先级：
-//   ① -advertise 显式给的值
-//   ② -client 里写的是具体 IP（如 10.0.0.11:9001）
-//   ③ -client 里写的是主机名 → 解析成 IP
-//   ④ 都没法用（:9001 / 0.0.0.0:9001）→ 本机第一个非回环 IPv4
-//   ⑤ 连网卡都查不到（极端情况）→ 主机名
+//
+//	① listen.client_host 写的是具体 IP（如 10.0.0.11:9001）
+//	② 写的是主机名 → 解析成 IP
+//	③ 没法用（:9001 / 0.0.0.0:9001）→ 本机第一个非回环 IPv4（私网优先）
+//	④ 连网卡都查不到（极端情况）→ 主机名
 //
 // 为什么不直接用 hostname：多台服务器部署时 hostname 常常是随机串（容器），
-// 客户端和运维都需要一个"能连、能看懂"的地址。
-func advertiseAddr(explicit, listen string) string {
-	if explicit != "" {
-		return explicit
-	}
+// 逻辑层与运维都需要一个"能连、能看懂"的地址。
+func advertiseAddr(listen string) string {
 	if host, _, err := net.SplitHostPort(listen); err == nil && host != "" {
 		switch {
 		case host == "0.0.0.0" || host == "::":
@@ -225,12 +259,9 @@ func localIPv4() string {
 	return fallback
 }
 
-// portOf 取监听地址的端口（"0.0.0.0:9001" → 9001）。
-func portOf(listen string) int {
-	_, p, err := net.SplitHostPort(listen)
-	if err != nil {
-		return 0
+func orDefault(s, def string) string {
+	if s == "" {
+		return def
 	}
-	n, _ := strconv.Atoi(p)
-	return n
+	return s
 }
