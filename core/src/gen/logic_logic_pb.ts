@@ -10,16 +10,16 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file logic_logic.proto.
  */
 export const file_logic_logic: GenFile = /*@__PURE__*/
-  fileDesc("ChFsb2dpY19sb2dpYy5wcm90bxICZnciWAoPQ3Jvc3NDYWxsTm90aWZ5EhIKCmRzdF9lbnRpdHkYASABKAkSDgoGbWV0aG9kGAIgASgJEg8KB2NvbnRlbnQYAyABKAwSEAoIdHJhY2VfaWQYBCABKAlCFFoSbWV0ZXIvc2NoZW1hL3BiO3BiYgZwcm90bzM");
+  fileDesc("ChFsb2dpY19sb2dpYy5wcm90bxICZnciVQoPQ3Jvc3NDYWxsTm90aWZ5Eg8KB3NyY19odWIYASABKAkSDgoGbWV0aG9kGAIgASgJEg8KB2NvbnRlbnQYAyABKAwSEAoIdHJhY2VfaWQYBCABKAlCFFoSbWV0ZXIvc2NoZW1hL3BiO3BiYgZwcm90bzM");
 
 /**
  * @generated from message fw.CrossCallNotify
  */
 export type CrossCallNotify = Message<"fw.CrossCallNotify"> & {
   /**
-   * @generated from field: string dst_entity = 1;
+   * @generated from field: string src_hub = 1;
    */
-  dstEntity: string;
+  srcHub: string;
 
   /**
    * @generated from field: string method = 2;

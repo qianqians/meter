@@ -43,13 +43,20 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// 跨实体调用：目标节点按 `dst_entity` 找到本地实体，再用 `method` + `content` 执行。
-// （没有内部封套，所以路由信息必须显式写在这条消息里。）
+// 跨实体调用（**单向通知**，不回包）：发起方 hub 用自己的标识 + 方法名 + 包体发过去，
+// 收方按 `method` 分发、从 `content` 里自己取目标实体。
+//
+// 为什么带 `src_hub` 而不是 `dst_entity`：
+//
+//	· hub 之间的连接是**部署拓扑**决定的（一条连接就是一个对端 hub），所以"发给谁"由连接表达；
+//	· `src_hub` 让收方能回发通知、也能做环路检测（A→B→A 的链要能断）；
+//	· 目标实体属于业务语义（"让 1001 号玩家处理这件事"），放在 `content` 里由业务解，
+//	  框架不替业务决定路由粒度。
 type CrossCallNotify struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	DstEntity     string                 `protobuf:"bytes,1,opt,name=dst_entity,json=dstEntity,proto3" json:"dst_entity,omitempty"`
-	Method        string                 `protobuf:"bytes,2,opt,name=method,proto3" json:"method,omitempty"`   // 目标方法名（由目标节点自身分发）
-	Content       []byte                 `protobuf:"bytes,3,opt,name=content,proto3" json:"content,omitempty"` // 目标方法的请求体（逻辑层决定的不透明字节）
+	SrcHub        string                 `protobuf:"bytes,1,opt,name=src_hub,json=srcHub,proto3" json:"src_hub,omitempty"` // 发起方 hub 的标识（回发与环路检测用）
+	Method        string                 `protobuf:"bytes,2,opt,name=method,proto3" json:"method,omitempty"`               // 目标方法名（由目标节点自身分发）
+	Content       []byte                 `protobuf:"bytes,3,opt,name=content,proto3" json:"content,omitempty"`             // 目标方法的请求体（逻辑层决定的不透明字节）
 	TraceId       string                 `protobuf:"bytes,4,opt,name=trace_id,json=traceId,proto3" json:"trace_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -85,9 +92,9 @@ func (*CrossCallNotify) Descriptor() ([]byte, []int) {
 	return file_logic_logic_proto_rawDescGZIP(), []int{0}
 }
 
-func (x *CrossCallNotify) GetDstEntity() string {
+func (x *CrossCallNotify) GetSrcHub() string {
 	if x != nil {
-		return x.DstEntity
+		return x.SrcHub
 	}
 	return ""
 }
@@ -117,10 +124,9 @@ var File_logic_logic_proto protoreflect.FileDescriptor
 
 const file_logic_logic_proto_rawDesc = "" +
 	"\n" +
-	"\x11logic_logic.proto\x12\x02fw\"}\n" +
-	"\x0fCrossCallNotify\x12\x1d\n" +
-	"\n" +
-	"dst_entity\x18\x01 \x01(\tR\tdstEntity\x12\x16\n" +
+	"\x11logic_logic.proto\x12\x02fw\"w\n" +
+	"\x0fCrossCallNotify\x12\x17\n" +
+	"\asrc_hub\x18\x01 \x01(\tR\x06srcHub\x12\x16\n" +
 	"\x06method\x18\x02 \x01(\tR\x06method\x12\x18\n" +
 	"\acontent\x18\x03 \x01(\fR\acontent\x12\x19\n" +
 	"\btrace_id\x18\x04 \x01(\tR\atraceIdB\x14Z\x12meter/schema/pb;pbb\x06proto3"

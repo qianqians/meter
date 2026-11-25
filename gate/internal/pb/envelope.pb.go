@@ -15,7 +15,7 @@
 //
 // **没有内部封套**：跨进程的路由信息（源/目的节点、目的实体、trace）由各条内部消息
 // 自己的字段表达（`CallEntity.entity_id`、`GateForwardHubCallClient.conn_id`、
-// `CrossCallRequest.dst_entity`…），不再额外包一层 `InternalEnvelope`。
+// `CrossCallNotify.src_hub`、`ClientRequestHub.entity_id`…），不再额外包一层 `InternalEnvelope`。
 //
 
 package pb

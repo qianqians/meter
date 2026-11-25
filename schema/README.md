@@ -149,7 +149,7 @@ cd schema
 
 | # | 事项 | 状态 / 暂定做法 |
 |---|---|---|
-| 1 | `CrossCallRequest{dst_entity, method, content, trace_id}` 与 `Envelope.method` 重复（同一个方法写两遍） | 暂留。若将来要瘦身，缩成 `{dst_entity, trace_id}` 即可 |
+| 1 | `CrossCallNotify` 的 `method` 与 `Envelope.method` 语义重叠 | 暂留：它要能脱离 Envelope 单独当转发指令用。真瘦身时缩成 `{src_hub, trace_id}` |
 | 2 | `ClientResponseHub` 缺 `conn_id` | 暂不加。配对靠 `Envelope.callback_id`；只有需要"按连接统计 RTT"时才需要它 |
 | 3 | 状态上报（连接数 / rps / pps / tick 延迟 / 节点健康） | **不做消息，交给 consul + 指标系统**。原 `NodeLoadReport` / `SessionRateHint` / `NodeHeartbeat` 已删除 |
 | 4 | `HubKickOffClient` 发出去之后的**关闭结果回执** | 未做。gate 关连接失败（连接已消失）目前只打日志 |
@@ -165,4 +165,5 @@ cd schema
 | 日期 | 变更 | 原因 |
 |---|---|---|
 | 2026-11-20 | **删除 `logic_dbproxy.proto`（17 条存储原语）** | **数据落地放 hub**：逻辑层直接写存储，不再有独立的 dbproxy 进程。存储原语的语义（不透明 key/value、`expect_version` 乐观锁、批量非事务）下沉为 hub 内部的一个存储模块，不再是跨进程协议 |
-| 2026-11-23 | **`logic_logic.proto` 删到只剩 `CrossCallRequest`** | 实体迁移改成"原节点落库 → 新节点按 key 重新加载"（不搬状态字节）；频道广播交给各 hub 自己按订阅扇出，不再占框架协议 |
+| 2026-11-23 | **`logic_logic.proto` 删到只剩一条跨实体调用**（现名 `CrossCallNotify`） | 实体迁移改成"原节点落库 → 新节点按 key 重新加载"（不搬状态字节）；频道广播交给各 hub 自己按订阅扇出，不再占框架协议 |
+| 2026-11-25 | `CrossCallRequest{dst_entity}` → **`CrossCallNotify{src_hub}`** | 单向通知、不回包；寻址由 hub 之间的连接决定，"让谁处理"属于业务语义（放 `content`）。`src_hub` 支持回发与环路检测 |

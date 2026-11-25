@@ -469,7 +469,7 @@ register("entity.attack", (req) => rsp): void
 | **P1** | 第一条热路径消息用 **SoA** 实现（`MoveBatch`）；其余全 AoS | 端到端跑通；客户端每帧解码 < 1 ms |
 | **P2** | `SceneSnapshot` + `EntityDeltaBatch` 迁 SoA；引入 zstd-19（快照）/ zstd-3（>512 B 增量） | 带宽与 P1 对比有量化下降；解压不超 0.5% 帧预算 |
 | **P3** | gate 变"只读帧头"的透传器 | gate 单进程连接密度达标（对应 §8 的 S4） |
-| **P4** | 回放落 pb 帧 + 帧头；跨服调用走 `CrossCallRequest` | 回放能逐帧重发 |
+| **P4** | 回放落 pb 帧 + 帧头；跨服调用走 `CrossCallNotify`（单向） | 回放能逐帧重发 |
 
 ### 8.1 P0 的验收测试（帧头只有一次机会，所以先写测试）
 
