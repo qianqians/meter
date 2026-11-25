@@ -184,11 +184,18 @@ internal TCP 端口然后连上来（见"两个端口为什么这样分工"）�
 
 | 方向 | 输入 | 输出 |
 |---|---|---|
-| 客户端 → 逻辑 | `Envelope{REQUEST, method=业务方法名, body=ClientUplink{call=CallEntity}}` | `Envelope{method="gate.clientRequest", body=ClientRequestHub{conn_id, entity_id, content, method}}` |
-| 客户端 → 逻辑（框架消息） | `ClientUplink{login/reconnect/logout/heartbeat/ack}` | `Envelope{method="gate.clientUplink", body=原样}` |
-| 逻辑 → 客户端（调用） | `GateForwardHubCallClient/Group/Global` | `Envelope{method=业务方法名, body=ClientDownlink{call}}` |
-| 逻辑 → 客户端（视图） | `HubCreatePlayerEntity/…/RefreshEntity` | `Envelope{method="", body=ClientDownlink{create_player/create_remote/refresh/delete}}` |
-| 逻辑 → gate（踢人） | `HubKickOffClient{conn_id, error, prompt_info}` | `ClientDownlink{kick_off}` 后关闭（`SendAndClose`） |
+| 客户端 → 逻辑（业务调用） | `Envelope{REQUEST, body=ClientUplink{call}}` | `ClientRequestHub{conn_id, entity_id, content, method}` |
+| 客户端 → 逻辑（业务调用响应） | `Envelope{RESPONSE, body=ClientUplink{call}}` | `ClientResponseHub{entity_id, error, content, method}` |
+| 客户端 → 逻辑（登录） | `ClientUplink{login}` | `GateForwardClientRequestService{service_name="auth", gate_name, conn_id, content}` |
+| 客户端 → 逻辑（重连） | `ClientUplink{reconnect}` | `GateForwardClientRequestReconnect{gate_name, conn_id, user_id, content}` |
+| 客户端 → 逻辑（其余框架消息） | `ClientUplink{logout/heartbeat/ack}` | 原样透传 |
+| 客户端断开 | 连接关闭 / 超时 | `ClientDisconnect{conn_id, user_id, entity_id}` — **逻辑层据此做离线处理** |
+| 逻辑 → 客户端（调用） | `GateForwardHubCallClient/Group/Global` | `Envelope{method=业务方法名, body=ClientDownlink{call/global}}` |
+| 逻辑 → 客户端（视图） | `HubCreatePlayerEntity/…/RefreshEntity` | `Envelope{method="", body=ClientDownlink{create_player/…}}` |
+| 逻辑 → gate（踢人） | `HubKickOffClient` | `ClientDownlink{kick_off}` 后关闭 |
+| 逻辑 → gate（排空） | `GateDrain{gate_id, grace_ms}` | 摘掉该节点（不再向它投递新上行） |
+
+**逻辑层寻址**：`sendToLogic` 按**会话的 NodeID** 选节点（实体在哪就发哪）；未登录时任选一个。
 
 **gate 不解 `content`**：它只读 `entity_id` / `conn_id` 用于寻址，`content` 原样搬。唯一的翻译是"内部消息 → 客户端消息"这一层包装。
 
@@ -201,7 +208,7 @@ internal TCP 端口然后连上来（见"两个端口为什么这样分工"）�
 
 ## 还没做
 
-1. 真按 `entity → node` 选逻辑节点（现在 P0 是"任取一个"）
+1. ~~按 `entity → node` 选逻辑节点~~ ✅ 已按会话 NodeID 选
 2. 压缩（帧头 `flags` 的 zstd 位留好了，两端都没接）
 3. 限流与背压、写缓冲上限
 4. TLS（WSS 需要证书；现在只有明文 WS）

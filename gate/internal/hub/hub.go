@@ -24,8 +24,9 @@ type Peer interface {
 
 // Hub 负责：客户端 ⇄ 逻辑层的转发、会话表维护、广播扇出。
 type Hub struct {
-	sess *session.Table
-	now  func() uint32 // 单调毫秒，用于帧头 ts
+	sess     *session.Table
+	now      func() uint32 // 单调毫秒，用于帧头 ts
+	gateName string        // 本 gate 的标识（转发给逻辑层时它需要知道回哪里）
 
 	mu      sync.RWMutex
 	clients map[string]Peer // conn_id → 客户端连接
@@ -36,21 +37,22 @@ type Hub struct {
 
 // Stats 是 hub 的计数器（上 metrics 时直接读这个）。
 type Stats struct {
-	ClientFrames   uint64
-	LogicFrames    uint64
-	UnknownClient  uint64 // 目标 conn 不存在
-	BadEnvelope    uint64
-	ForwardedUp    uint64
-	ForwardedDown  uint64
-	Kicks          uint64
+	ClientFrames  uint64
+	LogicFrames   uint64
+	UnknownClient uint64 // 目标 conn 不存在
+	BadEnvelope   uint64
+	ForwardedUp   uint64
+	ForwardedDown uint64
+	Kicks         uint64
 }
 
-func New(sess *session.Table, now func() uint32) *Hub {
+func New(sess *session.Table, now func() uint32, gateName string) *Hub {
 	return &Hub{
-		sess:    sess,
-		now:     now,
-		clients: make(map[string]Peer),
-		logics:  make(map[string]Peer),
+		sess:     sess,
+		now:      now,
+		gateName: gateName,
+		clients:  make(map[string]Peer),
+		logics:   make(map[string]Peer),
 	}
 }
 
@@ -70,14 +72,32 @@ func (h *Hub) AddClient(connID string, p Peer) {
 	h.mu.Unlock()
 }
 
-// RemoveClient 注销客户端连接，并把它从会话表里摘掉。
+// RemoveClient 注销客户端连接：摘会话表 + **通知逻辑层**。
+//
+// 必须发 ClientDisconnect：否则逻辑层不知道玩家离线——实体不会下线、好友收不到下线事件、
+// 离线消息也不会转存。这是"连接断开"成为一条协议消息的全部理由。
 func (h *Hub) RemoveClient(connID string) {
 	h.mu.Lock()
 	delete(h.clients, connID)
 	h.mu.Unlock()
-	if s := h.sess.Unbind(connID); s != nil {
-		log.Printf("[%s] 断开 user=%s entity=%s", connID, s.UserID, s.EntityID)
+
+	s := h.sess.Unbind(connID)
+	var userID, entityID string
+	if s != nil {
+		userID, entityID = s.UserID, s.EntityID
+		log.Printf("[%s] 断开 user=%s entity=%s", connID, userID, entityID)
 	}
+
+	body, err := protoMarshal(&pb.ClientDisconnect{
+		ConnId:   connID,
+		UserId:   userID,   // 未登录为空
+		EntityId: entityID, // 同上
+		// 断开原因：正常关闭填 0；心跳超时/协议错误由接入层另行通知（P0 全部按正常关闭）
+	})
+	if err != nil {
+		return
+	}
+	h.sendToLogic(connID, "gate.clientDisconnect", pb.MsgType_MSG_NOTIFY, 0, body)
 }
 
 // AddLogic 登记一个逻辑节点（TCP 对内）。
@@ -145,14 +165,72 @@ func (h *Hub) OnClient(connID string, env *pb.Envelope, up *pb.ClientUplink) {
 
 	switch body := up.GetBody().(type) {
 	case *pb.ClientUplink_Call:
+		if env.GetMsgType() == pb.MsgType_MSG_RESPONSE {
+			// ② 客户端对服务端 CallEntity{REQUEST} 的回包：
+			// 配对靠 callback_id，逻辑层只关心"哪个实体回的什么"，不关心在哪条连接上。
+			s, ok := h.sess.ByConn(connID)
+			if !ok {
+				h.unknownClient()
+				return
+			}
+			b, err := protoMarshal(&pb.ClientResponseHub{
+				EntityId: s.EntityID,
+				Error:    errorOf(env.GetStatus(), env.GetBody()),
+				Content:  env.GetBody(),
+				Method:   env.GetMethod(),
+			})
+			if err != nil {
+				return
+			}
+			h.sendToLogic(connID, "gate.clientResponse", pb.MsgType_MSG_RESPONSE, env.GetCallbackId(), b)
+			h.mu.Lock()
+			h.stats.ForwardedUp++
+			h.mu.Unlock()
+			return
+		}
 		h.forwardCall(connID, env, body.Call)
-	case *pb.ClientUplink_Login, *pb.ClientUplink_Reconnect, *pb.ClientUplink_Logout,
-		*pb.ClientUplink_Heartbeat, *pb.ClientUplink_Ack:
-		// 框架消息：原样交给逻辑层（gate 不解释），body 仍是 ClientUplink 的字节
-		h.sendToLogic("gate.clientUplink", env.GetMsgType(), env.GetCallbackId(), env.GetBody())
+
+	case *pb.ClientUplink_Login:
+		// ④ 登录不是透传：逻辑层需要知道"谁在哪台 gate 的哪条连接上登录"，
+		// 否则回包（HubCreatePlayerEntity）找不到目标连接。
+		b, err := protoMarshal(&pb.GateForwardClientRequestService{
+			ServiceName: "auth",
+			GateName:    h.gateName,
+			ConnId:      connID,
+			Content:     marshalUplinkMember(up, env),
+		})
+		if err != nil {
+			return
+		}
+		h.sendToLogic(connID, "gate.clientLogin", pb.MsgType_MSG_REQUEST, env.GetCallbackId(), b)
 		h.mu.Lock()
 		h.stats.ForwardedUp++
 		h.mu.Unlock()
+
+	case *pb.ClientUplink_Reconnect:
+		// ③ 重连：逻辑层需要旧 conn 的会话信息 + 新连接 id，才能判断"恢复还是全量重建"。
+		s, _ := h.sess.ByConn(connID) // 新连接通常还没绑会话
+		b, err := protoMarshal(&pb.GateForwardClientRequestReconnect{
+			GateName: h.gateName,
+			ConnId:   connID,
+			UserId:   s.UserID, // 可能为空（旧连接的会话已摘），由逻辑层凭 resume_token 判定
+			Content:  marshalUplinkMember(up, env),
+		})
+		if err != nil {
+			return
+		}
+		h.sendToLogic(connID, "gate.clientReconnect", pb.MsgType_MSG_REQUEST, env.GetCallbackId(), b)
+		h.mu.Lock()
+		h.stats.ForwardedUp++
+		h.mu.Unlock()
+
+	case *pb.ClientUplink_Logout, *pb.ClientUplink_Heartbeat, *pb.ClientUplink_Ack:
+		// 其余框架消息：原样交给逻辑层（gate 不解释）
+		h.sendToLogic(connID, "gate.clientUplink", env.GetMsgType(), env.GetCallbackId(), env.GetBody())
+		h.mu.Lock()
+		h.stats.ForwardedUp++
+		h.mu.Unlock()
+
 	default:
 		h.badEnvelope()
 	}
@@ -183,24 +261,35 @@ func (h *Hub) forwardCall(connID string, env *pb.Envelope, call *pb.CallEntity) 
 	if err != nil {
 		return
 	}
-	h.sendToLogic("gate.clientRequest", env.GetMsgType(), env.GetCallbackId(), body)
+	h.sendToLogic(connID, "gate.clientRequest", env.GetMsgType(), env.GetCallbackId(), body)
 	h.mu.Lock()
 	h.stats.ForwardedUp++
 	h.mu.Unlock()
 }
 
 // sendToLogic 把消息发给逻辑节点。P0：只有一个节点时直发；多个时按会话的 node_id 选。
-func (h *Hub) sendToLogic(method string, msgType pb.MsgType, callbackID uint32, body []byte) {
+// sendToLogic 把消息发给逻辑节点。
+//
+// 寻址规则：**connID 有会话时用会话绑定的 NodeID**（实体在哪个节点就发哪里）；
+// 未登录（无会话）则任选一个（登录请求任何节点都能处理，处理完由逻辑层下发
+// HubCreatePlayerEntity 把会话绑到那个节点）。
+func (h *Hub) sendToLogic(connID, method string, msgType pb.MsgType, callbackID uint32, body []byte) {
 	h.mu.RLock()
 	var peer Peer
-	for _, p := range h.logics {
-		peer = p
-		break // P0：任取一个（真实现要按 entity→node 选，见 session.Session.NodeID）
+	if connID != "" {
+		if s, ok := h.sess.ByConn(connID); ok && s.NodeID != "" {
+			peer = h.logics[s.NodeID]
+		}
+	}
+	if peer == nil {
+		for _, p := range h.logics { // 未登录或节点不在了：任取一个
+			peer = p
+			break
+		}
 	}
 	h.mu.RUnlock()
 	if peer == nil {
-		// 没有逻辑节点：丢弃（客户端会等到超时，这是 P0 的已知行为）
-		return
+		return // 没有逻辑节点：丢弃（调用方超时）
 	}
 	_ = peer.Send(&pb.Envelope{MsgType: msgType, Method: method, CallbackId: callbackID, Body: body})
 }
@@ -289,6 +378,18 @@ func (h *Hub) OnLogic(nodeID string, env *pb.Envelope) {
 		for _, cid := range dedupe(m.GetConnId()) {
 			h.sendCallEntity(cid, m.GetEntityId(), m.GetMethod(), 0, m.GetContent())
 		}
+
+	case "gate.drain":
+		// ⑧ 逻辑层通知 gate：我要停机了（gate 会停止向它投递新的上行）。
+		// gate 侧的配合动作：把这个节点从"可投递"集合里摘掉（连接本身保留，在途消息能跑完）。
+		var m pb.GateDrain
+		if !h.unmarshalBody(env, &m) {
+			return
+		}
+		h.mu.Lock()
+		delete(h.logics, m.GetGateId()) // 摘掉之后 sendToLogic 的 fallback 不会再选它
+		h.mu.Unlock()
+		log.Printf("逻辑节点 %s 请求排空（grace=%dms，原因=%s）", m.GetGateId(), m.GetGraceMs(), m.GetReason())
 
 	case "gate.forwardHubCallGlobal":
 		var m pb.GateForwardHubCallGlobal

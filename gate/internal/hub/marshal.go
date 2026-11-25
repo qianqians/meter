@@ -41,8 +41,34 @@ func errorOf(status uint32, body []byte) *pb.ErrorCode {
 }
 
 // badEnvelope 计一次"解不开的信封/oneof"。
+func (h *Hub) unknownClient() {
+	h.mu.Lock()
+	h.stats.UnknownClient++
+	h.mu.Unlock()
+}
+
 func (h *Hub) badEnvelope() {
 	h.mu.Lock()
 	h.stats.BadEnvelope++
 	h.mu.Unlock()
+}
+
+// marshalUplinkMember 把 ClientUplink 的某个成员重新序列化为**裸的业务消息字节**。
+// Login/Reconnect 转发给逻辑层时，逻辑层只需要 Login 本身（不需要外层 ClientUplink 包装），
+// 所以这里从 uplink oneof 里取出成员对象再编码一次。
+func marshalUplinkMember(up *pb.ClientUplink, env *pb.Envelope) []byte {
+	switch body := up.GetBody().(type) {
+	case *pb.ClientUplink_Login:
+		b, err := proto.Marshal(body.Login)
+		if err == nil {
+			return b
+		}
+	case *pb.ClientUplink_Reconnect:
+		b, err := proto.Marshal(body.Reconnect)
+		if err == nil {
+			return b
+		}
+	}
+	// 兜底：原样（调用方应保证传进来的是 Login 或 Reconnect）
+	return env.GetBody()
 }

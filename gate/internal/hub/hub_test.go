@@ -34,7 +34,7 @@ func (f *fakePeer) count() int { f.mu.Lock(); defer f.mu.Unlock(); return len(f.
 
 func newHub() (*Hub, *session.Table) {
 	sess := session.New()
-	return New(sess, func() uint32 { return 42 }), sess
+	return New(sess, func() uint32 { return 42 }, "gate-test"), sess
 }
 
 func mustBody(t *testing.T, m proto.Message) []byte {
@@ -195,4 +195,86 @@ func TestOnClientFrameBadEnvelope(t *testing.T) {
 	if h.Stats().BadEnvelope != 1 {
 		t.Fatalf("坏信封应计数: %+v", h.Stats())
 	}
+}
+
+// ② 客户端 RESPONSE：应转成 ClientResponseHub 发给逻辑层
+func TestClientResponseForwarded(t *testing.T) {
+	h, sess := newHub()
+	client, logic := &fakePeer{}, &fakePeer{}
+	h.AddClient("c1", client)
+	h.AddLogic("n1", logic)
+	sess.Bind(session.Session{ConnID: "c1", EntityID: "e1", NodeID: "n1"})
+
+	h.OnClient("c1",
+		&pb.Envelope{MsgType: pb.MsgType_MSG_RESPONSE, Method: "entity.query", CallbackId: 9},
+		&pb.ClientUplink{Body: &pb.ClientUplink_Call{Call: &pb.CallEntity{EntityId: "e1", Content: []byte{7}}}})
+
+	got := logic.last()
+	if got == nil || got.GetMsgType() != pb.MsgType_MSG_RESPONSE || got.GetCallbackId() != 9 {
+		t.Fatalf("RESPONSE 未正确转发: %+v", got)
+	}
+	var r pb.ClientResponseHub
+	if err := proto.Unmarshal(got.GetBody(), &r); err != nil {
+		t.Fatal(err)
+	}
+	if r.GetEntityId() != "e1" || r.GetMethod() != "entity.query" {
+		t.Fatalf("ClientResponseHub 字段不对: %+v", &r)
+	}
+}
+
+// ① 客户端断开：应发 ClientDisconnect 给逻辑层
+func TestDisconnectNotifiesLogic(t *testing.T) {
+	h, _ := newHub()
+	logic := &fakePeer{}
+	h.AddLogic("n1", logic)
+	h.AddClient("c1", &fakePeer{})
+
+	h.RemoveClient("c1") // 无会话也发（user_id/entity_id 为空）
+
+	got := logic.last()
+	if got == nil || got.GetMethod() != "gate.clientDisconnect" {
+		t.Fatalf("断开未通知逻辑层: %+v", got)
+	}
+	var d pb.ClientDisconnect
+	if err := proto.Unmarshal(got.GetBody(), &d); err != nil {
+		t.Fatal(err)
+	}
+	if d.GetConnId() != "c1" {
+		t.Fatalf("conn_id 不对: %+v", &d)
+	}
+}
+
+// ⑥ 按会话的 NodeID 选逻辑节点
+func TestSendToLogicUsesSessionNode(t *testing.T) {
+	h, sess := newHub()
+	right, wrong := &fakePeer{}, &fakePeer{}
+	h.AddLogic("n-right", right)
+	h.AddLogic("n-wrong", wrong)
+	sess.Bind(session.Session{ConnID: "c1", EntityID: "e1", NodeID: "n-right"})
+
+	h.OnClient("c1",
+		&pb.Envelope{MsgType: pb.MsgType_MSG_NOTIFY, Method: "entity.move"},
+		&pb.ClientUplink{Body: &pb.ClientUplink_Call{Call: &pb.CallEntity{EntityId: "e1"}}})
+
+	if wrong.count() != 0 {
+		t.Fatal("不应发给 wrong 节点")
+	}
+	if right.count() == 0 {
+		t.Fatal("应发给 right 节点")
+	}
+}
+
+// ⑧ GateDrain：摘掉节点
+func TestDrainRemovesLogicNode(t *testing.T) {
+	h, _ := newHub()
+	p := &fakePeer{}
+	h.AddLogic("n1", p)
+
+	body := mustBody(t, &pb.GateDrain{GateId: "n1", GraceMs: 5000, Reason: "upgrade"})
+	h.OnLogic("other", &pb.Envelope{Method: "gate.drain", Body: body})
+
+	// 再发一条给 n1 的消息：sendToLogic 应 fallback（节点已摘）或到别的节点，不应崩
+	h.OnClient("c-none",
+		&pb.Envelope{MsgType: pb.MsgType_MSG_NOTIFY, Method: "entity.move"},
+		&pb.ClientUplink{Body: &pb.ClientUplink_Call{Call: &pb.CallEntity{EntityId: "e1"}}})
 }

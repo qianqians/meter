@@ -56,7 +56,12 @@ func main() {
 	nowMs := func() uint32 { return uint32(time.Since(startedAt).Milliseconds()) }
 
 	sess := session.New()
-	h := hub.New(sess, nowMs)
+	// gate 名（转发给逻辑层时用）：配置的 node.id，或由 IP+端口推导
+	gateName := cfg.Node.ID
+	if gateName == "" {
+		gateName = "gate-" + advertiseAddr(cfg.ClientAddr()) + "-" + strconv.Itoa(cfg.Listen.LogicPort)
+	}
+	h := hub.New(sess, nowMs, gateName)
 
 	// ---------- consul 注册与状态上报 ----------
 	var reg registry.Registry = registry.Nop{}
