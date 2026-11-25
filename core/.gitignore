@@ -1,3 +1,2 @@
 node_modules/
 # codegen 产物（cd schema && ./check.sh 生成）
-src/gen/

@@ -24,8 +24,6 @@ syntax = "proto3";
 
 package fw;
 
-import "common.proto";
-
 option go_package = "meter/schema/pb;pb";
 
 // ---------------------------------------------------------------------------
@@ -37,7 +35,7 @@ option go_package = "meter/schema/pb;pb";
 
 // 跨实体调用：目标节点按 `dst_entity` 找到本地实体，再用 `method` + `content` 执行。
 // （没有内部封套，所以路由信息必须显式写在这条消息里。）
-message CrossCallRequest {
+message CrossCallNotify {
   string dst_entity = 1;
   string method = 2;               // 目标方法名（由目标节点自身分发）
   bytes  content = 3;              // 目标方法的请求体（逻辑层决定的不透明字节）
