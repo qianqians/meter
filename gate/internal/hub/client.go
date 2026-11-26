@@ -38,9 +38,7 @@ func (h *Hub) OnClientFrame(connID string, f frame.Frame) {
 
 // OnClient 按 oneof 的成员分派。形状由 protobuf 表达，这里不再靠方法名前缀猜。
 func (h *Hub) OnClient(connID string, env *pb.Envelope, up *pb.ClientUplink) {
-	h.mu.Lock()
-	h.stats.ClientFrames++
-	h.mu.Unlock()
+	h.stats.clientFrames.Add(1)
 
 	switch body := up.GetBody().(type) {
 	case *pb.ClientUplink_Call:
@@ -64,9 +62,7 @@ func (h *Hub) OnClient(connID string, env *pb.Envelope, up *pb.ClientUplink) {
 				return
 			}
 			h.sendToLogic(connID, "gate.clientResponse", pb.MsgType_MSG_RESPONSE, env.GetCallbackId(), b)
-			h.mu.Lock()
-			h.stats.ForwardedUp++
-			h.mu.Unlock()
+			h.stats.forwardedUp.Add(1)
 			return
 		}
 		h.forwardCall(connID, env, body.Call)
@@ -84,9 +80,7 @@ func (h *Hub) OnClient(connID string, env *pb.Envelope, up *pb.ClientUplink) {
 			return
 		}
 		h.sendToLogic(connID, "gate.clientLogin", pb.MsgType_MSG_REQUEST, env.GetCallbackId(), b)
-		h.mu.Lock()
-		h.stats.ForwardedUp++
-		h.mu.Unlock()
+		h.stats.forwardedUp.Add(1)
 
 	case *pb.ClientUplink_Reconnect:
 		// ③ 重连：逻辑层需要旧 conn 的会话信息 + 新连接 id，才能判断"恢复还是全量重建"。
@@ -101,16 +95,12 @@ func (h *Hub) OnClient(connID string, env *pb.Envelope, up *pb.ClientUplink) {
 			return
 		}
 		h.sendToLogic(connID, "gate.clientReconnect", pb.MsgType_MSG_REQUEST, env.GetCallbackId(), b)
-		h.mu.Lock()
-		h.stats.ForwardedUp++
-		h.mu.Unlock()
+		h.stats.forwardedUp.Add(1)
 
 	case *pb.ClientUplink_Logout, *pb.ClientUplink_Heartbeat, *pb.ClientUplink_Ack:
 		// 其余框架消息：原样交给逻辑层（gate 不解释）
 		h.sendToLogic(connID, "gate.clientUplink", env.GetMsgType(), env.GetCallbackId(), env.GetBody())
-		h.mu.Lock()
-		h.stats.ForwardedUp++
-		h.mu.Unlock()
+		h.stats.forwardedUp.Add(1)
 
 	default:
 		h.badEnvelope()
@@ -121,9 +111,7 @@ func (h *Hub) OnClient(connID string, env *pb.Envelope, up *pb.ClientUplink) {
 func (h *Hub) forwardCall(connID string, env *pb.Envelope, call *pb.CallEntity) {
 	s, ok := h.sess.ByConn(connID)
 	if !ok {
-		h.mu.Lock()
-		h.stats.UnknownClient++
-		h.mu.Unlock()
+		h.stats.unknownClient.Add(1)
 		return
 	}
 	_ = s // 会话存在即可；目标实体来自 call.entity_id（可能是别的怪/NPC）
@@ -143,9 +131,7 @@ func (h *Hub) forwardCall(connID string, env *pb.Envelope, call *pb.CallEntity) 
 		return
 	}
 	h.sendToLogic(connID, "gate.clientRequest", env.GetMsgType(), env.GetCallbackId(), body)
-	h.mu.Lock()
-	h.stats.ForwardedUp++
-	h.mu.Unlock()
+	h.stats.forwardedUp.Add(1)
 }
 
 // sendToLogic 把消息发给逻辑节点。

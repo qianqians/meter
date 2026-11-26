@@ -20,9 +20,7 @@ func mustMarshal(m proto.Message) []byte {
 // unmarshalBody 把 Envelope.body 解到具体消息里；失败计数并返回 false。
 func (h *Hub) unmarshalBody(env *pb.Envelope, m proto.Message) bool {
 	if err := proto.Unmarshal(env.GetBody(), m); err != nil {
-		h.mu.Lock()
-		h.stats.BadEnvelope++
-		h.mu.Unlock()
+		h.stats.badEnvelope.Add(1)
 		return false
 	}
 	return true
@@ -42,15 +40,11 @@ func errorOf(status uint32, body []byte) *pb.ErrorCode {
 
 // badEnvelope 计一次"解不开的信封/oneof"。
 func (h *Hub) unknownClient() {
-	h.mu.Lock()
-	h.stats.UnknownClient++
-	h.mu.Unlock()
+	h.stats.unknownClient.Add(1)
 }
 
 func (h *Hub) badEnvelope() {
-	h.mu.Lock()
-	h.stats.BadEnvelope++
-	h.mu.Unlock()
+	h.stats.badEnvelope.Add(1)
 }
 
 // marshalUplinkMember 把 ClientUplink 的某个成员重新序列化为**裸的业务消息字节**。

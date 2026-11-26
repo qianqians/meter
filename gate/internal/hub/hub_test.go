@@ -13,25 +13,41 @@ import (
 )
 
 type fakePeer struct {
-	mu   sync.Mutex
-	sent []*pb.Envelope
+	mu  sync.Mutex
+	raw [][]byte // 已 marshal 的 Envelope 字节（与真 Peer 的 SendBytes 路径同构）
 }
 
 func (f *fakePeer) Send(env *pb.Envelope) error {
+	b, err := proto.Marshal(env)
+	if err != nil {
+		return err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.sent = append(f.sent, env)
+	f.raw = append(f.raw, b)
 	return nil
 }
+
+func (f *fakePeer) SendBytes(b []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.raw = append(f.raw, b)
+	return nil
+}
+
 func (f *fakePeer) last() *pb.Envelope {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if len(f.sent) == 0 {
+	if len(f.raw) == 0 {
 		return nil
 	}
-	return f.sent[len(f.sent)-1]
+	var env pb.Envelope
+	if err := proto.Unmarshal(f.raw[len(f.raw)-1], &env); err != nil {
+		return nil
+	}
+	return &env
 }
-func (f *fakePeer) count() int { f.mu.Lock(); defer f.mu.Unlock(); return len(f.sent) }
+func (f *fakePeer) count() int { f.mu.Lock(); defer f.mu.Unlock(); return len(f.raw) }
 
 func newHub() (*Hub, *session.Table) {
 	sess := session.New()

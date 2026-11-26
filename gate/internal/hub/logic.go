@@ -13,9 +13,7 @@ import (
 
 // OnLogic 处理一条来自逻辑层的 Envelope。
 func (h *Hub) OnLogic(nodeID string, env *pb.Envelope) {
-	h.mu.Lock()
-	h.stats.LogicFrames++
-	h.mu.Unlock()
+	h.stats.logicFrames.Add(1)
 
 	switch env.GetMethod() {
 	case "hub.createPlayerEntity":
@@ -101,10 +99,15 @@ func (h *Hub) OnLogic(nodeID string, env *pb.Envelope) {
 		if !h.unmarshalBody(env, &m) {
 			return
 		}
-		// 名单是**连接**（由逻辑层解析好），这里只保证去重
-		for _, cid := range dedupe(m.GetConnId()) {
-			h.sendCallEntity(cid, m.GetEntityId(), m.GetMethod(), 0, m.GetContent(), pb.MsgType_MSG_NOTIFY)
-		}
+		// 名单是**连接**（由逻辑层解析好），这里只保证去重。
+		// 同一条消息只 marshal 一次：逐连接走 SendBytes（只做帧编码+写出）。
+		h.broadcastDown(dedupe(m.GetConnId()), &pb.Envelope{
+			MsgType: pb.MsgType_MSG_NOTIFY,
+			Method:  m.GetMethod(),
+			Body: mustMarshal(&pb.ClientDownlink{
+				Body: &pb.ClientDownlink_Call{Call: &pb.CallEntity{EntityId: m.GetEntityId(), Content: m.GetContent()}},
+			}),
+		})
 
 	case "gate.drain":
 		// ⑧ 逻辑层通知 gate：我要停机了（gate 会停止向它投递新的上行）。
@@ -124,29 +127,21 @@ func (h *Hub) OnLogic(nodeID string, env *pb.Envelope) {
 			return
 		}
 		h.mu.RLock()
-		peers := make([]Peer, 0, len(h.clients))
-		for _, p := range h.clients {
-			peers = append(peers, p)
+		connIDs := make([]string, 0, len(h.clients))
+		for cid := range h.clients {
+			connIDs = append(connIDs, cid)
 		}
 		h.mu.RUnlock()
-		out := &pb.Envelope{
+		h.broadcastDown(connIDs, &pb.Envelope{
 			MsgType: pb.MsgType_MSG_NOTIFY,
 			Method:  m.GetMethod(),
 			Body: mustMarshal(&pb.ClientDownlink{
 				Body: &pb.ClientDownlink_Global{Global: &pb.CallGlobal{Content: m.GetContent()}},
 			}),
-		}
-		for _, p := range peers {
-			_ = p.Send(out)
-		}
-		h.mu.Lock()
-		h.stats.ForwardedDown++
-		h.mu.Unlock()
+		})
 
 	default:
-		h.mu.Lock()
-		h.stats.BadEnvelope++
-		h.mu.Unlock()
+		h.stats.badEnvelope.Add(1)
 	}
 }
 
@@ -158,8 +153,35 @@ func (h *Hub) sendCallEntity(connID, entityID, method string, callbackID uint32,
 	}, withMsgType(msgType), withCallback(callbackID))
 }
 
+// broadcastDown 是组播/全服广播的公共路径：**Envelope 只 marshal 一次**，
+// 逐连接 SendBytes（帧编码+写出）。逐连接调 Send 会把同一条消息 proto.Marshal N 遍
+// （bench：50 连接 364 allocs → 这条路径 <60）。
+// ForwardedDown 按连接计——扇出工作量才是这个指标的语义（单发/组播/全服一致）。
+func (h *Hub) broadcastDown(connIDs []string, env *pb.Envelope) {
+	b, err := protoMarshal(env)
+	if err != nil {
+		return
+	}
+	h.mu.RLock()
+	peers := make([]Peer, 0, len(connIDs))
+	for _, cid := range connIDs {
+		if p, ok := h.clients[cid]; ok {
+			peers = append(peers, p)
+		} else {
+			h.stats.unknownClient.Add(1)
+		}
+	}
+	h.mu.RUnlock()
+	for _, p := range peers {
+		if p.SendBytes(b) == nil {
+			h.stats.forwardedDown.Add(1)
+		}
+	}
+}
+
 // deliverDown 把一条 ClientDownlink 发给某条客户端连接。
 // method 只在 call / global 两种成员上有意义（业务方法名），其余传空。
+// Envelope 在这里 marshal 一次，走 SendBytes（与广播同一条零重复-marshal 路径）。
 func (h *Hub) deliverDown(connID, method string, down *pb.ClientDownlink, opts ...deliverOpt) {
 	o := deliverOptions{msgType: pb.MsgType_MSG_NOTIFY}
 	for _, f := range opts {
@@ -169,15 +191,12 @@ func (h *Hub) deliverDown(connID, method string, down *pb.ClientDownlink, opts .
 	p := h.clients[connID]
 	h.mu.RUnlock()
 	if p == nil {
-		h.mu.Lock()
-		h.stats.UnknownClient++
-		h.mu.Unlock()
+		h.stats.unknownClient.Add(1)
 		return
 	}
-	_ = p.Send(&pb.Envelope{MsgType: o.msgType, Method: method, CallbackId: o.callbackID, Body: mustMarshal(down)})
-	h.mu.Lock()
-	h.stats.ForwardedDown++
-	h.mu.Unlock()
+	if p.SendBytes(mustMarshal(&pb.Envelope{MsgType: o.msgType, Method: method, CallbackId: o.callbackID, Body: mustMarshal(down)})) == nil {
+		h.stats.forwardedDown.Add(1)
+	}
 }
 
 type deliverOptions struct {
@@ -221,9 +240,7 @@ func (h *Hub) kick(connID string, code int, prompt string) {
 		_ = p.Send(env)
 		h.ShutdownClient(connID)
 	}
-	h.mu.Lock()
-	h.stats.Kicks++
-	h.mu.Unlock()
+	h.stats.kicks.Add(1)
 }
 
 // ---------------- 小工具 ----------------

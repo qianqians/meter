@@ -97,7 +97,12 @@ func (p *wsPeer) Send(env *pb.Envelope) error {
 	if err != nil {
 		return err
 	}
-	out, err := frame.Encode(frame.Frame{TS: p.now(), Payload: b})
+	return p.SendBytes(b)
+}
+
+// SendBytes 发已 marshal 的 Envelope 字节（广播路径：marshal 一次发 N 次，见 hub.Peer）。
+func (p *wsPeer) SendBytes(envBytes []byte) error {
+	out, err := frame.Encode(frame.Frame{TS: p.now(), Payload: envBytes})
 	if err != nil {
 		return err
 	}

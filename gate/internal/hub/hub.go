@@ -14,6 +14,7 @@ package hub
 import (
 	"log"
 	"sync"
+	"sync/atomic"
 
 	pb "meter/gate/internal/pb"
 	"meter/gate/internal/session"
@@ -22,6 +23,9 @@ import (
 // Peer 是一个能收 Envelope 的对端（客户端连接或逻辑层连接）。
 type Peer interface {
 	Send(env *pb.Envelope) error
+	// SendBytes 发一段**已 marshal 的 Envelope 字节**。广播路径用它：消息只 marshal 一次，
+	// 逐连接只做帧编码与写出（若逐连接调 Send，同一消息会被 proto.Marshal N 遍）。
+	SendBytes(envBytes []byte) error
 }
 
 // Hub 负责：客户端 ⇄ 逻辑层的转发、会话表维护、广播扇出。
@@ -37,10 +41,12 @@ type Hub struct {
 	clients map[string]Peer // conn_id → 客户端连接
 	logics  map[string]Peer // node_id → 逻辑层连接
 
-	stats Stats
+	// stats 是纯原子计数，**不走 h.mu**：每条消息要加 2~3 次计数，跟连接表共用一把锁
+	// 会让多核并发完全串行（bench 实测 16 并发零加速）。快照用 Stats()。
+	stats statsCounters
 }
 
-// Stats 是 hub 的计数器（上 metrics 时直接读这个）。
+// Stats 是 hub 的计数器快照（上 metrics 时直接读这个）。真值存在 statsCounters 里，原子加。
 type Stats struct {
 	ClientFrames  uint64
 	LogicFrames   uint64
@@ -49,6 +55,17 @@ type Stats struct {
 	ForwardedUp   uint64
 	ForwardedDown uint64
 	Kicks         uint64
+}
+
+// statsCounters 是 Stats 的原子实现（字段与 Stats 一一对应）。
+type statsCounters struct {
+	clientFrames  atomic.Uint64
+	logicFrames   atomic.Uint64
+	unknownClient atomic.Uint64
+	badEnvelope   atomic.Uint64
+	forwardedUp   atomic.Uint64
+	forwardedDown atomic.Uint64
+	kicks         atomic.Uint64
 }
 
 func New(sess *session.Table, now func() uint32, gateName string, mq MQ) *Hub {
@@ -64,9 +81,15 @@ func New(sess *session.Table, now func() uint32, gateName string, mq MQ) *Hub {
 
 // Stats 返回计数器的快照。
 func (h *Hub) Stats() Stats {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return h.stats
+	return Stats{
+		ClientFrames:  h.stats.clientFrames.Load(),
+		LogicFrames:   h.stats.logicFrames.Load(),
+		UnknownClient: h.stats.unknownClient.Load(),
+		BadEnvelope:   h.stats.badEnvelope.Load(),
+		ForwardedUp:   h.stats.forwardedUp.Load(),
+		ForwardedDown: h.stats.forwardedDown.Load(),
+		Kicks:         h.stats.kicks.Load(),
+	}
 }
 
 // ---------------- 连接注册 ----------------
