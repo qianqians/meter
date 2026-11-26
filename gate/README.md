@@ -4,9 +4,14 @@
 
 ```
 客户端 ──WebSocket(:9001/ws)──►  gate  ──TCP(:9002)──►  逻辑层
-                                  │
+                                  │  ↘ NATS（旁路，可选）
                           session 表（conn ⇄ entity）+ hub 路由
 ```
+
+进程间通信分两层：**TCP 直连**是主通道（gate ⇄ 逻辑层）；**NATS 消息队列层**是旁路
+（`nats.enabled` 才连）：服务器→服务器走 `entity_{id}_logic_mq`，服务器→gate 走
+`entity_{id}_gate_mq`（消息体与 TCP 同构的 Envelope，hub 收到后送进同一套 OnLogic 分派）。
+订阅生命周期跟随会话：建会话订阅、断开/顶号退订。
 
 ## 结构
 
@@ -15,9 +20,10 @@ gate/
   cmd/gate/main.go          两个监听端口的装配与优雅退出
   internal/clientgate/      对外 WebSocket 接入（gorilla/websocket）
   internal/logiclink/       对内 TCP 接入（逻辑节点连进来）
-  internal/hub/             **中央路由**：客户端 ⇄ 逻辑层、组播去重、广播、踢人
+  internal/hub/             **中央路由**：客户端 ⇄ 逻辑层、组播去重、广播、踢人；NATS 旁路下行
   internal/config/          **JSON 配置**：默认值、注释键剥离、校验、地址/时长换算（14 条测试）
   internal/registry/        **consul**：服务注册 / TTL 心跳 / 状态上报 / 注销（不引 SDK，直接打 HTTP API）
+  internal/natsmq/          **NATS 消息队列层**（旁路）：Connect/Publish/Consume(channel)，subject 约定
   internal/session/         会话表：conn → (user, entity, node) / entity → conn
   internal/frame/           8 字节帧头（与 core/src/frame.ts 逐字节一致）
   internal/pb/              codegen 产物（gitignored）
@@ -64,8 +70,9 @@ gate -dump-config > config.json
 | `consul` | `enabled` / `url` | 关闭时下面几项忽略 |
 | | `ttl_s` / `report_interval_s` | **必须满足 report < ttl**，否则启动就报错；`report_interval_s` 就是"每多少秒上报一次" |
 | | `tags` | 注册时带的 tags |
-| `redis` | `cache_url` / `mq_url` | **缓存**与**消息队列**分开两个库，便于按需扩容/隔离 |
+| `redis` | `cache_url` | **缓存**（消息队列已改用 nats 段） |
 | | `pool_size` / `dial_timeout_ms` | 连接池与建连超时 |
+| `nats` | `enabled` / `url` | **消息队列层**（旁路）：核心 NATS；server↔server `entity_{id}_logic_mq`，server→gate `entity_{id}_gate_mq`；连不上仅记日志，TCP 主通道不受影响 |
 | `log` | `dir` / `file_name` | `file_name` 支持 `%Y%m%d%H`；空则只打 stderr |
 | | `level` / `max_size_mb` / `keep_days` | 级别与轮转 |
 

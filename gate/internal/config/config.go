@@ -23,6 +23,7 @@ type Config struct {
 	Listen Listen `json:"listen"`
 	Consul Consul `json:"consul"`
 	Redis  Redis  `json:"redis"`
+	NATS   NATS   `json:"nats"`
 	Log    Log    `json:"log"`
 }
 
@@ -55,10 +56,14 @@ type Consul struct {
 }
 
 type Redis struct {
-	CacheURL      string `json:"cache_url"`
-	MQURL         string `json:"mq_url"`
+	CacheURL      string `json:"cache_url"` // 只做缓存；消息队列已改用 NATS（见 NATS 段）
 	PoolSize      int    `json:"pool_size"`
 	DialTimeoutMs int    `json:"dial_timeout_ms"`
+}
+
+type NATS struct {
+	Enabled bool   `json:"enabled"` // 消息队列层（旁路）：核心 NATS，无持久化；false 时 url 忽略
+	URL     string `json:"url"`     // 服务器→服务器 entity_{id}_logic_mq；服务器→gate entity_{id}_gate_mq
 }
 
 type Log struct {
@@ -91,9 +96,12 @@ func Default() Config {
 		},
 		Redis: Redis{
 			CacheURL:      "redis://127.0.0.1:6379/0",
-			MQURL:         "redis://127.0.0.1:6379/1",
 			PoolSize:      16,
 			DialTimeoutMs: 3000,
+		},
+		NATS: NATS{
+			Enabled: false, // 本地默认不开：TCP 直连层已够用，MQ 是旁路
+			URL:     "nats://127.0.0.1:4222",
 		},
 		Log: Log{
 			Dir:       "./logs",
@@ -192,14 +200,14 @@ func (c *Config) applyZeroDefaults() {
 	if c.Redis.CacheURL == "" {
 		c.Redis.CacheURL = d.Redis.CacheURL
 	}
-	if c.Redis.MQURL == "" {
-		c.Redis.MQURL = d.Redis.MQURL
-	}
 	if c.Redis.PoolSize == 0 {
 		c.Redis.PoolSize = d.Redis.PoolSize
 	}
 	if c.Redis.DialTimeoutMs == 0 {
 		c.Redis.DialTimeoutMs = d.Redis.DialTimeoutMs
+	}
+	if c.NATS.URL == "" {
+		c.NATS.URL = d.NATS.URL
 	}
 	if c.Log.Dir == "" {
 		c.Log.Dir = d.Log.Dir
@@ -309,11 +317,15 @@ func (c Config) Dump() ([]byte, error) {
 		},
 		"redis": map[string]any{
 			"cache_url":       c.Redis.CacheURL,
-			"mq_url":          c.Redis.MQURL,
 			"pool_size":       c.Redis.PoolSize,
 			"dial_timeout_ms": c.Redis.DialTimeoutMs,
-			"//cache_url":     "缓存：会话热点数据、限流计数",
-			"//mq_url":        "消息队列：跨服消息（与缓存分库，便于隔离与扩容）",
+			"//cache_url":     "缓存：会话热点数据、限流计数（消息队列已改用 nats 段）",
+		},
+		"nats": map[string]any{
+			"enabled":   c.NATS.Enabled,
+			"url":       c.NATS.URL,
+			"//url":     "核心 NATS（无持久化）：server↔server 走 entity_{id}_logic_mq，server→gate 走 entity_{id}_gate_mq",
+			"//enabled": "旁路开关：false 时 gate 不连 NATS，TCP 直连层不受影响",
 		},
 		"log": map[string]any{
 			"dir":         c.Log.Dir,

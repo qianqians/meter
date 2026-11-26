@@ -3,6 +3,7 @@ package hub
 import (
 	"sync"
 	"testing"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -34,7 +35,7 @@ func (f *fakePeer) count() int { f.mu.Lock(); defer f.mu.Unlock(); return len(f.
 
 func newHub() (*Hub, *session.Table) {
 	sess := session.New()
-	return New(sess, func() uint32 { return 42 }, "gate-test"), sess
+	return New(sess, func() uint32 { return 42 }, "gate-test", nil), sess
 }
 
 func mustBody(t *testing.T, m proto.Message) []byte {
@@ -277,4 +278,183 @@ func TestDrainRemovesLogicNode(t *testing.T) {
 	h.OnClient("c-none",
 		&pb.Envelope{MsgType: pb.MsgType_MSG_NOTIFY, Method: "entity.move"},
 		&pb.ClientUplink{Body: &pb.ClientUplink_Call{Call: &pb.CallEntity{EntityId: "e1"}}})
+}
+
+// ---------------- NATS 旁路 ----------------
+
+// fakeMQ 模拟 *natsmq.Client 的 Consume 语义：订阅拿 channel，cancel 后 channel close。
+type fakeMQ struct {
+	mu     sync.Mutex
+	subs   map[string][]chan []byte // subject → 订阅者们（顶号窗口内可能 >1）
+	canon  map[string]chan []byte   // subject → 当前活跃订阅
+	closed map[chan []byte]bool     // 订阅 channel → 是否已退（按 channel 记：顶号重订阅不算旧账）
+}
+
+func newFakeMQ() *fakeMQ {
+	return &fakeMQ{subs: map[string][]chan []byte{}, canon: map[string]chan []byte{}, closed: map[chan []byte]bool{}}
+}
+
+func (f *fakeMQ) Consume(subject string) (<-chan []byte, func()) {
+	ch := make(chan []byte, 16)
+	f.mu.Lock()
+	f.subs[subject] = append(f.subs[subject], ch)
+	f.canon[subject] = ch
+	f.mu.Unlock()
+	return ch, func() {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if !f.closed[ch] {
+			f.closed[ch] = true
+			close(ch)
+		}
+	}
+}
+
+// push 向 subject 的活跃订阅塞一条消息（测试里模拟逻辑服务器 Publish）。
+func (f *fakeMQ) push(t *testing.T, subject string, data []byte) {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	ch, ok := f.canon[subject]
+	if !ok {
+		t.Fatalf("%s 没有订阅", subject)
+	}
+	select {
+	case ch <- data:
+	default:
+		t.Fatal("假 MQ channel 满")
+	}
+}
+
+func (f *fakeMQ) subscribed(subject string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	ch, ok := f.canon[subject]
+	return ok && !f.closed[ch]
+}
+
+// ⑨ NATS 旁路：建会话时订阅 entity_{id}_gate_mq，收到 Envelope 后走 OnLogic 同一套分派下发
+func TestMqBypassDeliversDown(t *testing.T) {
+	mq := newFakeMQ()
+	sess := session.New()
+	h := New(sess, func() uint32 { return 42 }, "gate-test", mq)
+	client := &fakePeer{}
+	h.AddClient("c1", client)
+
+	// 建会话（走 TCP 路径的 createPlayerEntity 也应触发 MQ 订阅）
+	h.OnLogic("n1", &pb.Envelope{Method: "hub.createPlayerEntity", Body: mustBody(t,
+		&pb.HubCreatePlayerEntity{ConnId: "c1", UserId: "u1", EntityId: "e1"})})
+
+	if !mq.subscribed("entity_e1_gate_mq") {
+		t.Fatal("建会话后应已订阅 entity_e1_gate_mq")
+	}
+
+	// 逻辑服务器把一条与 TCP 同构的 Envelope 投到 MQ（无帧头）
+	body := mustBody(t, &pb.GateForwardHubCallClient{ConnId: "c1", EntityId: "e1", Content: []byte{7}, Method: "entity.attack"})
+	mq.push(t, "entity_e1_gate_mq", mustBody(t,
+		&pb.Envelope{MsgType: pb.MsgType_MSG_REQUEST, Method: "gate.forwardHubCallClient", CallbackId: 5, Body: body}))
+
+	waitFor(t, func() bool { return client.last() != nil && client.last().GetMethod() == "entity.attack" })
+	got := client.last()
+	if got.GetCallbackId() != 5 {
+		t.Fatalf("NATS 旁路下发字段不对: %+v", got)
+	}
+
+	// 断开：订阅退掉
+	h.RemoveClient("c1")
+	if mq.subscribed("entity_e1_gate_mq") {
+		t.Fatal("断开后应已退订 entity_e1_gate_mq")
+	}
+}
+
+// ⑩ 顶号：旧订阅退掉、新订阅生效，不重复消费
+func TestMqEvictionResubscribes(t *testing.T) {
+	mq := newFakeMQ()
+	sess := session.New()
+	h := New(sess, func() uint32 { return 42 }, "gate-test", mq)
+	old, fresh := &fakePeer{}, &fakePeer{}
+	h.AddClient("old", old)
+	h.AddClient("new", fresh)
+
+	mk := func(conn string) *pb.Envelope {
+		return &pb.Envelope{Method: "hub.createPlayerEntity", Body: mustBody(t,
+			&pb.HubCreatePlayerEntity{ConnId: conn, UserId: "u1", EntityId: "e1"})}
+	}
+	h.OnLogic("n1", mk("old"))
+	// 同实体新连接绑走旧连接：旧订阅应被退（canon 换成新的活跃订阅）
+	h.OnLogic("n1", mk("new"))
+
+	if !mq.subscribed("entity_e1_gate_mq") {
+		t.Fatal("新会话应持有订阅")
+	}
+	// 顶号会把建会话推送 + KickOff 发给旧连接，先记下它的基线，只验证 MQ 下发不重复达
+	baseOld := old.count()
+
+	// 活跃订阅应是第二个（顶号后旧 channel 已 close，push 只会进新的）
+	body := mustBody(t, &pb.GateForwardHubCallClient{ConnId: "new", EntityId: "e1", Content: []byte{1}, Method: "m"})
+	mq.push(t, "entity_e1_gate_mq", mustBody(t, &pb.Envelope{Method: "gate.forwardHubCallClient", Body: body}))
+
+	waitFor(t, func() bool { return fresh.last() != nil && fresh.last().GetMethod() == "m" })
+	if old.count() != baseOld {
+		t.Fatalf("旧连接不应再收到 MQ 下发: 基线 %d，实际 %d", baseOld, old.count())
+	}
+}
+
+// 坏信封（解不开的 Envelope）走 BadEnvelope 计数，不崩
+func TestMqBadEnvelopeCounted(t *testing.T) {
+	mq := newFakeMQ()
+	sess := session.New()
+	h := New(sess, func() uint32 { return 42 }, "gate-test", mq)
+	h.AddClient("c1", &fakePeer{})
+	h.OnLogic("n1", &pb.Envelope{Method: "hub.createPlayerEntity", Body: mustBody(t,
+		&pb.HubCreatePlayerEntity{ConnId: "c1", UserId: "u1", EntityId: "e1"})})
+
+	mq.push(t, "entity_e1_gate_mq", []byte{0xff, 0xff, 0xff, 0xff})
+	waitFor(t, func() bool { return h.Stats().BadEnvelope == 1 })
+}
+
+// waitFor 轮询等异步泵 goroutine 完成（上限 1s）。
+func waitFor(t *testing.T, ok func() bool) {
+	t.Helper()
+	for i := 0; i < 200; i++ {
+		if ok() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("等待异步条件超时")
+}
+
+// ⑪ 逻辑层对客户端 REQUEST 的回包：forwardHubCallClient + MSG_RESPONSE 原样透传
+// （客户端 callEntity 的闭环腿：请求 cb=N 上来，回包 cb=N 下去）
+func TestLogicResponsePassthrough(t *testing.T) {
+	h, _ := newHub()
+	client := &fakePeer{}
+	h.AddClient("c1", client)
+
+	body := mustBody(t, &pb.GateForwardHubCallClient{ConnId: "c1", EntityId: "e1", Content: []byte{9}, Method: "entity.attack"})
+	h.OnLogic("n1", &pb.Envelope{MsgType: pb.MsgType_MSG_RESPONSE, Method: "gate.forwardHubCallClient", CallbackId: 7, Body: body})
+
+	got := client.last()
+	if got == nil {
+		t.Fatal("客户端没收到回包")
+	}
+	if got.GetMsgType() != pb.MsgType_MSG_RESPONSE || got.GetCallbackId() != 7 {
+		t.Fatalf("RESPONSE 应原样透传（msgType + callbackId），实际 %+v", got)
+	}
+}
+
+// 回包透传不影响既有语义：callback≠0 且非 RESPONSE 仍是服务端调客户端的 REQUEST
+func TestLogicRequestStillRequest(t *testing.T) {
+	h, _ := newHub()
+	client := &fakePeer{}
+	h.AddClient("c1", client)
+
+	body := mustBody(t, &pb.GateForwardHubCallClient{ConnId: "c1", EntityId: "e1", Content: []byte{9}, Method: "entity.attack"})
+	h.OnLogic("n1", &pb.Envelope{MsgType: pb.MsgType_MSG_REQUEST, Method: "gate.forwardHubCallClient", CallbackId: 11, Body: body})
+
+	got := client.last()
+	if got.GetMsgType() != pb.MsgType_MSG_REQUEST || got.GetCallbackId() != 11 {
+		t.Fatalf("服务端调客户端仍是 REQUEST，实际 %+v", got)
+	}
 }

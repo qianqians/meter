@@ -1,9 +1,10 @@
 // 服务注册与状态上报：**直接说 consul 的 HTTP API**，不引 SDK。
 //
 // 只做三件事（对应服务生命周期的三个时刻）：
-//   ① 启动   PUT /v1/agent/service/register      —— 注册服务 + 一个 TTL 健康检查
-//   ② 运行中 PUT /v1/agent/check/pass/service:{id}?note=...  —— 心跳 + 把状态写进 note
-//   ③ 退出   PUT /v1/agent/service/deregister/{id}          —— 摘掉自己
+//
+//	① 启动   PUT /v1/agent/service/register      —— 注册服务 + 一个 TTL 健康检查
+//	② 运行中 PUT /v1/agent/check/pass/service:{id}?note=...  —— 心跳 + 把状态写进 note
+//	③ 退出   PUT /v1/agent/service/deregister/{id}          —— 摘掉自己
 //
 // 为什么状态上报走 TTL check 的 `note`：consul UI 和 `/v1/health/service/gate` 都能直接读到，
 // 不需要再引一套 metrics 存储；真正的时序指标应该交给 Prometheus（见 gate/README）。
@@ -43,9 +44,9 @@ type Registry interface {
 // Nop 是未配置 consul 时用的空实现（本地开发）。
 type Nop struct{}
 
-func (Nop) Register(context.Context, Info) error   { return nil }
+func (Nop) Register(context.Context, Info) error       { return nil }
 func (Nop) UpdateStatus(context.Context, string) error { return nil }
-func (Nop) Deregister(context.Context) error       { return nil }
+func (Nop) Deregister(context.Context) error           { return nil }
 
 // Consul 是 HTTP 实现。baseURL 形如 "http://127.0.0.1:8500"。
 type Consul struct {
@@ -70,12 +71,13 @@ func (c *Consul) checkID() string { return "service:" + c.serviceID }
 // Register 注册服务 + **一条 TTL 健康检查**。
 //
 // 为什么是 gate 主动 push（TTL）而不是让 consul 来拉（HTTP check）：
-//   · gate 常部署在 NAT / 安全组后面，**consul 反向拨入 gate 的健康端口不一定通**，
-//     而 gate → consul 的 8500 是必通的（不然连注册都做不到）；
-//   · 主动 push 顺带把状态塞进 `?note=`（一次请求干两件事），少一个监听端口、少一套防火墙规则；
-//   · 代价是"进程僵死但上报线程还在跑"骗过 consul —— 这靠两点兜：
-//     ① 上报线程自己也检查关键依赖（逻辑节点是否还在），② 真僵死时 gate 自己的
-//     WebSocket 读写循环也早就停了，玩家侧会先暴露问题。
+//
+//	· gate 常部署在 NAT / 安全组后面，**consul 反向拨入 gate 的健康端口不一定通**，
+//	  而 gate → consul 的 8500 是必通的（不然连注册都做不到）；
+//	· 主动 push 顺带把状态塞进 `?note=`（一次请求干两件事），少一个监听端口、少一套防火墙规则；
+//	· 代价是"进程僵死但上报线程还在跑"骗过 consul —— 这靠两点兜：
+//	  ① 上报线程自己也检查关键依赖（逻辑节点是否还在），② 真僵死时 gate 自己的
+//	  WebSocket 读写循环也早就停了，玩家侧会先暴露问题。
 func (c *Consul) Register(ctx context.Context, info Info) error {
 	body := map[string]any{
 		"ID":      c.serviceID,
@@ -85,9 +87,9 @@ func (c *Consul) Register(ctx context.Context, info Info) error {
 		"Tags":    info.Tags,
 		"Meta":    info.Meta,
 		"Check": map[string]any{
-			"CheckID":                         c.checkID(),
-			"Name":                            "gate ttl",
-			"TTL":                             c.ttl.String(),
+			"CheckID":                        c.checkID(),
+			"Name":                           "gate ttl",
+			"TTL":                            c.ttl.String(),
 			"DeregisterCriticalServiceAfter": "1m",
 		},
 	}

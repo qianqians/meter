@@ -54,9 +54,11 @@ func (h *Hub) OnClient(connID string, env *pb.Envelope, up *pb.ClientUplink) {
 			}
 			b, err := protoMarshal(&pb.ClientResponseHub{
 				EntityId: s.EntityID,
-				Error:    errorOf(env.GetStatus(), env.GetBody()),
-				Content:  env.GetBody(),
-				Method:   env.GetMethod(),
+				// 客户端回包的载荷在 ClientUplink.call.content 里（不是外层 body：
+				// body 是 ClientUplink 包装；错误时客户端把 ErrorCode 放在 content 里）
+				Error:   errorOf(env.GetStatus(), body.Call.GetContent()),
+				Content: body.Call.GetContent(),
+				Method:  env.GetMethod(),
 			})
 			if err != nil {
 				return

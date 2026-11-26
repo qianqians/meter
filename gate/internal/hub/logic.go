@@ -29,8 +29,11 @@ func (h *Hub) OnLogic(nodeID string, env *pb.Envelope) {
 			ConnID: m.GetConnId(), UserID: m.GetUserId(), EntityID: m.GetEntityId(), NodeID: nodeID,
 		}); evicted != nil {
 			log.Printf("实体 %s 被新连接重新绑定，踢掉旧连接 %s", m.GetEntityId(), evicted.ConnID)
+			// 顶号：旧连接的 Unbind 拿不到会话了（已被挤掉），gate_mq 订阅必须在这里退
+			h.unsubscribeEntity(evicted.EntityID)
 			h.kick(evicted.ConnID, 4, "该账号已在别处登录")
 		}
+		h.subscribeEntity(m.GetEntityId()) // 会话建立：订阅 entity_{id}_gate_mq（未启用 NATS 时是空操作）
 		h.deliverDown(m.GetConnId(), "", &pb.ClientDownlink{
 			Body: &pb.ClientDownlink_CreatePlayer{CreatePlayer: &pb.CreatePlayerEntity{
 				EntityId: m.GetEntityId(), EntityType: m.GetEntityType(), Content: m.GetContent(),
@@ -82,7 +85,16 @@ func (h *Hub) OnLogic(nodeID string, env *pb.Envelope) {
 		if !h.unmarshalBody(env, &m) {
 			return
 		}
-		h.sendCallEntity(m.GetConnId(), m.GetEntityId(), m.GetMethod(), env.GetCallbackId(), m.GetContent())
+		// msgType 三态：逻辑层回包（RESPONSE）**原样透传**——客户端 callEntity 的闭环
+		// （请求→gate→逻辑→回包）靠这条；其余维持原语义（有 callback → 服务端调客户端的 REQUEST）。
+		msgType := pb.MsgType_MSG_NOTIFY
+		switch {
+		case env.GetMsgType() == pb.MsgType_MSG_RESPONSE:
+			msgType = pb.MsgType_MSG_RESPONSE
+		case env.GetCallbackId() != 0:
+			msgType = pb.MsgType_MSG_REQUEST
+		}
+		h.sendCallEntity(m.GetConnId(), m.GetEntityId(), m.GetMethod(), env.GetCallbackId(), m.GetContent(), msgType)
 
 	case "gate.forwardHubCallGroup":
 		var m pb.GateForwardHubCallGroup
@@ -91,7 +103,7 @@ func (h *Hub) OnLogic(nodeID string, env *pb.Envelope) {
 		}
 		// 名单是**连接**（由逻辑层解析好），这里只保证去重
 		for _, cid := range dedupe(m.GetConnId()) {
-			h.sendCallEntity(cid, m.GetEntityId(), m.GetMethod(), 0, m.GetContent())
+			h.sendCallEntity(cid, m.GetEntityId(), m.GetMethod(), 0, m.GetContent(), pb.MsgType_MSG_NOTIFY)
 		}
 
 	case "gate.drain":
@@ -139,11 +151,8 @@ func (h *Hub) OnLogic(nodeID string, env *pb.Envelope) {
 }
 
 // sendCallEntity 把一次调用投给某条连接（客户端收到的 body 是 CallEntity）。
-func (h *Hub) sendCallEntity(connID, entityID, method string, callbackID uint32, content []byte) {
-	msgType := pb.MsgType_MSG_NOTIFY
-	if callbackID != 0 {
-		msgType = pb.MsgType_MSG_REQUEST
-	}
+// msgType 由调用方定：回包透传 RESPONSE、服务端主动调是 REQUEST、广播是 NOTIFY。
+func (h *Hub) sendCallEntity(connID, entityID, method string, callbackID uint32, content []byte, msgType pb.MsgType) {
 	h.deliverDown(connID, method, &pb.ClientDownlink{
 		Body: &pb.ClientDownlink_Call{Call: &pb.CallEntity{EntityId: entityID, Content: content}},
 	}, withMsgType(msgType), withCallback(callbackID))

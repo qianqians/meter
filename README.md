@@ -63,7 +63,7 @@
 
 ## 状态
 
-设计提案（design proposal）。**代码只有四处**：`spikes/`（可复现的基准与探针）、`schema/`（框架协议 + codegen 校验）、`core/`（逻辑层运行时骨架：8 字节帧头 + RPC 三函数，10 条测试）、`gate/`（接入层 Go 骨架：帧头 + 会话表 + 分派，能起、能回包）。**还没有可用的服务端**——逻辑层转发、WebSocket、压缩都没接。
+设计提案（design proposal）。**代码只有四处**：`spikes/`（可复现的基准与探针）、`schema/`（框架协议 + codegen 校验）、`core/`（逻辑层运行时：帧头 + RPC 三函数 + 实体/组/global 逻辑服，48 条测试 + e2e）、`gate/`（接入层 Go 骨架：帧头 + 会话表 + 分派，能起、能回包）。**端到端已通**（WS 客户端 → gate → TS 逻辑服 → 回包/广播），但业务逻辑、持久化、跨服还没接。
 
 `docs/mmorpg-verification-plan.md` 中的三个实验**均未执行**——本次会话的 shell（pwsh）不可用（每次调用以 `0xC0000142` / DLL 初始化失败退出），因此没有编译、没有运行、没有测量。该文档是**待执行的协议**，不是实测报告。
 
@@ -85,16 +85,22 @@ cd schema && ./check.sh     # protoc + protoc-gen-go + protoc-gen-es，再跑 11
 
 `.proto` 只描述消息（**没有 `service`**）：方法名由调用方给，类型绑定在业务侧的 `RpcMap`；`msg_type` 的权威定义是 `envelope.proto` 里的 `MsgType` enum。
 
-### `core/`：逻辑层运行时骨架
+### `core/`：逻辑层运行时
 
-`docs/protocol-map.md` 里定的两条硬规格已经落成代码，`npm test` 10 条全过：
+`docs/protocol-map.md` 里定的两条硬规格 + **游戏逻辑服**（参考 abelkhan hub 的结构），`npm test` 48 条全过，`npm run e2e` 全链路（真 gate + 逻辑服 + WS 客户端）验收：
 
 - **8 字节帧头**（`flags:zstd | len:u24 | ts:u32`）：编解码、半包、未知 flag 抛错、`ts` 跨 32 位回绕与异常时钟 clamp
-- **RPC 三函数**：`callEntity(method, reqBytes, RspSchema)` / `callGroup(method, reqBytes)` / `register(method, ReqSchema, RspSchema, handler)` —— 信封装配、`callback_id` 配对、超时、未知方法丢弃+计数
+- **RPC 三函数**（客户端侧）：`callEntity(method, reqBytes, RspSchema)` / `callGroup(method, reqBytes)` / `register(method, ReqSchema, RspSchema, handler)` —— 信封装配、`callback_id` 配对、超时、未知方法丢弃+计数
+- **实体**（`entity.ts`）：玩家/怪统一管理；`register` 收客户端调用，`rpcRequest`/`rpcNotify` 调客户端；视图同步三原语（createRemoteTo/deleteRemoteFrom/refreshTo）
+- **组**（`group.ts`）：join/leave 双向视图同步 + `rpcNotify` 组广播
+- **逻辑服**（`server.ts` + `gatelink.ts`）：TCP 连 gate（`logic.hello` 握手）+ 上行分派（login/request/response/disconnect）+ `global.rpcNotify` 全服广播
+- **NATS 旁路**（`natsmq.ts`）：`entity_{id}_logic_mq` / `entity_{id}_gate_mq` 的 publish/consume 封装
 
 ```bash
 cd schema && ./check.sh    # codegen → core/src/gen/（已 gitignore）
 cd ../core && npm install && npm test
+cd ../gate && go build -o ../core/scripts/gate-e2e.exe ./cmd/gate   # e2e 用
+cd ../core && npm run e2e
 ```
 
 ### `gate/`：接入层骨架（Go）
@@ -108,7 +114,7 @@ cd ../gate && go build ./... && go test ./... && go run ./cmd/gate -config confi
 - **会话表**：`conn → (user, entity, node)` 与 `entity → conn` 双向；同实体被新连接绑走时返回旧会话由 gate 踢掉
 - **两个监听端口**：对外 WebSocket（客户端）、对内 TCP（逻辑节点连入，首帧 `logic.hello`）
 - **hub 路由**：上行包成 `ClientRequestHub/NotifyHub/ResponseHub`，下行把 `Hub*` / `GateForwardHub*` 译成客户端消息；组播按连接去重、广播遍历
-- **JSON 配置**（结构体即文档，`gate -dump-config` 可导出带注释的默认配置）：对内 TCP / 对外 WS+TLS / consul / redis（缓存与 MQ 分库）/ 日志目录与轮转
+- **JSON 配置**（结构体即文档，`gate -dump-config` 可导出带注释的默认配置）：对内 TCP / 对外 WS+TLS / consul / redis（缓存）/ NATS（消息队列旁路）/ 日志目录与轮转
 - **consul**：服务注册（注册对内 TCP 端口，客户端端口放 meta）+ **每 N 秒上报一次状态**（同时是 TTL 心跳，`clients=… logic=… up=…/s down=…/s`）+ 退出注销；不引 SDK
 - 已冒烟（`gate/scripts/smoke.py`，零依赖）：两个端口 → 建会话 → 上行转发 → 逻辑层调客户端 → 踢人，六步全过
 

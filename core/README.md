@@ -14,8 +14,9 @@
 cd schema && ./check.sh    # 先出 codegen（生成到 core/src/gen/，已 gitignore）
 cd ../core
 npm install                # 首次
-npm test                   # vitest：10 条
+npm test                   # vitest：48 条
 npm run typecheck          # tsc --noEmit
+npm run e2e                # 全链路：先 cd ../gate && go build -o ../core/scripts/gate-e2e.exe ./cmd/gate
 ```
 
 ## API（就是那三个函数）
@@ -56,3 +57,54 @@ rpc.register('entity.attack', AttackRequestSchema, AttackResultSchema,
 - 压缩（帧头 `flags` 的 zstd 位还没接）
 - 权限：`CallEntity` 的 `entity_id` 鉴权在逻辑层，这里只转发
 - 与 `gate` 的实现联动：gate 的 Go 侧帧头还没写
+
+## 逻辑服 API（entity / group / global）
+
+```ts
+import { connectGate } from './src/gatelink';
+import { createLogicServer } from './src/server';
+
+const transport = await connectGate({ host: '127.0.0.1', port: 9002, nodeId: 'logic-a' });
+const server = createLogicServer({
+  transport, nodeId: 'logic-a',
+  onLogin: (login, connId) => ({
+    ok: true, userId: login.token, entityId: `e-${connId}`,
+    entityType: 'player', content: toBinary(PlayerInfoSchema, info),
+  }),
+  onPlayerCreate: (player) => {
+    // 客户端 → 实体：与 rpc.register 同形状
+    player.register('entity.attack', AtkReqSchema, AtkRspSchema,
+      (req) => ({ damage: calcDamage(req) }));
+
+    // 实体 → 客户端（要回包 / 不回包）
+    const rsp = await player.rpcRequest('entity.query', toBinary(QrySchema, q), RspSchema);
+    player.rpcNotify('entity.buff', toBinary(BuffSchema, buff));
+  },
+});
+
+// 怪（无连接：只收客户端调用，不能主动发）
+const wolf = server.createEntity('e-wolf-1', 'monster');
+wolf.register('entity.attack', AtkReqSchema, AtkRspSchema, handler);
+
+// 组（join 时双向视图同步；广播给组内所有玩家）
+const scene = server.createGroup('scene-1');
+scene.join(player);
+scene.join(wolf);
+scene.rpcNotify('scene.chat', toBinary(ChatSchema, msg), { from: player.id });
+
+// 全服广播
+server.global.rpcNotify('server.notice', toBinary(NoticeSchema, n));
+```
+
+**上行分派表**（gate → 逻辑服，server.ts 内部）：
+`gate.clientLogin` → onLogin 决策 → `hub.createPlayerEntity` / `hub.kickOffClient`；
+`gate.clientRequest`（REQUEST/NOTIFY 按 msgType 区分）→ 按 entity_id 分派；
+`gate.clientResponse` → 配对实体的在途 `rpcRequest`；
+`gate.clientDisconnect` → 销毁实体 + 退组。
+
+**协议映射**：`entity.rpcRequest`→`gate.forwardHubCallClient{REQUEST}`，
+回包→`{RESPONSE, 原 callback_id}`（gate 侧透传）；`group.rpcNotify`→`gate.forwardHubCallGroup`；
+`global.rpcNotify`→`gate.forwardHubCallGlobal`。零新增 proto。
+
+已知缺口（P0 推迟）：clientUplink 透传不带 conn_id（logout 只给 reason）；断线重连
+（gate.clientReconnect）未处理；跨服 entity 调用（NATS entity_{id}_logic_mq）留待实体所有权表。

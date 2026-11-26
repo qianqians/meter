@@ -28,6 +28,7 @@ import (
 	"meter/gate/internal/config"
 	"meter/gate/internal/hub"
 	"meter/gate/internal/logiclink"
+	"meter/gate/internal/natsmq"
 	"meter/gate/internal/registry"
 	"meter/gate/internal/session"
 )
@@ -61,7 +62,22 @@ func main() {
 	if gateName == "" {
 		gateName = "gate-" + advertiseAddr(cfg.ClientAddr()) + "-" + strconv.Itoa(cfg.Listen.LogicPort)
 	}
-	h := hub.New(sess, nowMs, gateName)
+
+	// ---------- NATS 消息队列层（旁路，可选） ----------
+	// 失败不致命：TCP 直连层不受影响，同 consul 注册失败的处理风格。
+	var mq hub.MQ
+	if cfg.NATS.Enabled {
+		c, err := natsmq.Connect(cfg.NATS.URL, gateName)
+		if err != nil {
+			log.Printf("NATS 建连失败 %s（继续运行，消息队列层不可用）: %v", cfg.NATS.URL, err)
+		} else {
+			mq = c
+			defer c.Close()
+			log.Printf("已连上 NATS %s（server→server entity_{id}_logic_mq，server→gate entity_{id}_gate_mq）", cfg.NATS.URL)
+		}
+	}
+
+	h := hub.New(sess, nowMs, gateName, mq)
 
 	// ---------- consul 注册与状态上报 ----------
 	var reg registry.Registry = registry.Nop{}

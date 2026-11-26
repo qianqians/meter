@@ -152,7 +152,8 @@ func TestDumpRoundTrips(t *testing.T) {
 	c.Consul.Enabled = true
 	c.Consul.TTLS = 60
 	c.Consul.ReportIntervalS = 15
-	c.Redis.MQURL = "redis://10.0.0.9:6379/3"
+	c.NATS.Enabled = true
+	c.NATS.URL = "nats://10.0.0.9:4222"
 	c.Log.Dir = "/var/log/gate"
 
 	out, err := c.Dump()
@@ -169,7 +170,7 @@ func TestDumpRoundTrips(t *testing.T) {
 	}
 	if back.Listen.ClientPort != 7001 || back.Listen.LogicPort != 7002 ||
 		!back.Consul.Enabled || back.Consul.TTLS != 60 || back.Consul.ReportIntervalS != 15 ||
-		back.Redis.MQURL != "redis://10.0.0.9:6379/3" || back.Log.Dir != "/var/log/gate" {
+		!back.NATS.Enabled || back.NATS.URL != "nats://10.0.0.9:4222" || back.Log.Dir != "/var/log/gate" {
 		t.Fatalf("往返后配置变了: %+v", back)
 	}
 }

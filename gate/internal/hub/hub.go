@@ -30,6 +30,9 @@ type Hub struct {
 	now      func() uint32 // 单调毫秒，用于帧头 ts
 	gateName string        // 本 gate 的标识（转发给逻辑层时它需要知道回哪里）
 
+	mq     MQ                // NATS 旁路（nil = 未启用，订阅/退订全部跳过）
+	mqSubs map[string]func() // entity_id → 退订函数（订阅生命周期跟随会话，见 mq.go）
+
 	mu      sync.RWMutex
 	clients map[string]Peer // conn_id → 客户端连接
 	logics  map[string]Peer // node_id → 逻辑层连接
@@ -48,11 +51,12 @@ type Stats struct {
 	Kicks         uint64
 }
 
-func New(sess *session.Table, now func() uint32, gateName string) *Hub {
+func New(sess *session.Table, now func() uint32, gateName string, mq MQ) *Hub {
 	return &Hub{
 		sess:     sess,
 		now:      now,
 		gateName: gateName,
+		mq:       mq,
 		clients:  make(map[string]Peer),
 		logics:   make(map[string]Peer),
 	}
@@ -88,6 +92,7 @@ func (h *Hub) RemoveClient(connID string) {
 	if s != nil {
 		userID, entityID = s.UserID, s.EntityID
 		log.Printf("[%s] 断开 user=%s entity=%s", connID, userID, entityID)
+		h.unsubscribeEntity(entityID) // 会话没了：gate_mq 订阅同步退掉
 	}
 
 	body, err := protoMarshal(&pb.ClientDisconnect{

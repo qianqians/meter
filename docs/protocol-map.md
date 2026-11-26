@@ -53,9 +53,11 @@
 ```mermaid
 flowchart LR
   C["Cocos 客户端（TS）"] <-->|"L1 · 长连接<br/>protobuf（SoA 热 / AoS 冷）<br/>8 B 帧头"| G["gate（Go）<br/>只读 8 字节，透传 payload"]
-  G <-->|"L3 · 内部<br/>pb 控制面 + 透传数据面"| K["core（TS）<br/>逻辑/战斗/AOI"]
+  G <-->|"L3 · 内部 TCP<br/>pb 控制面 + 透传数据面"| K["core（TS）<br/>逻辑/战斗/AOI"]
+  G <-->|"L3b · NATS 旁路<br/>entity_{id}_gate_mq"| N[("NATS")]
+  K <-->|"L5b · NATS 旁路<br/>entity_{id}_logic_mq"| N
   K <-->|"L4 · 直连（hub 内存储模块）"| D["DB / 缓存"]
-  K <-->|"L5 · pb"| K2["其他 scene / hub"]
+  K <-->|"L5 · pb（TCP 直连）"| K2["其他 scene / hub"]
   D <-->|"pb blob"| DB[("DB / Redis")]
   M["GM / 监控 / 后台"] -->|"L6 · HTTP + JSON"| K
 ```
@@ -66,7 +68,8 @@ flowchart LR
 | **L2** logic → gate → client 推送 | 同一通道，**字节透传** | gate 不解码，转发成本 = memcpy |
 | **L3** gate ⇄ logic | 控制面 pb；数据面**透传** | gate 若解码状态包，零分配设计就废了 |
 | **L4** logic(hub) ⇄ DB | **无独立进程**：hub 内的存储模块直连（驱动 + 版本 CAS + 批量） | 去掉一层进程 = 少一跳、少一套部署。存档仍是 pb 字节 + `schema_version` |
-| **L5** logic ↔ logic | **pb** | 低频、要能 debug；读方不是渲染层，不需要零拷贝 |
+| **L5** logic ↔ logic | **pb**（TCP 直连） | 低频、要能 debug；读方不是渲染层，不需要零拷贝 |
+| **L3b/L5b** NATS 旁路 | **pb Envelope（无帧头）**，subject：`entity_{id}_gate_mq`（server→gate，玩家所在 gate 订阅，随会话增退）、`entity_{id}_logic_mq`（server↔server，entity 所在服务器订） | 服务器间 IPC 分两层：TCP 直连是主通道，NATS 是跨进程异步投递的旁路；gate 收到后送进与 TCP 同一套 hub.OnLogic 分派，零新协议。核心 NATS（at-most-once），要可靠性再上 JetStream |
 | **L6** 运维面 | **HTTP + JSON**（pb 的 `toJson`） | 不引入第三套协议 |
 | **L7** 落库 / 日志 / 回放 | pb blob / JSON / **pb + 帧头** | 回放按帧重发原字节，零转码 |
 
