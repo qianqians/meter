@@ -1,4 +1,21 @@
+---
+id: meter-protocol
+type: module-design
+title: 协议契约：8 字节帧头 + Envelope + protobuf
+status: draft
+parent: meter-architecture
+---
+
 # 协议分工：默认 protobuf，什么时候才值得换
+
+> **规格图采纳说明**：本文是**线上协议的权威记录**（节点 `meter-protocol`）——8 字节帧头、
+> 唯一的 `Envelope`、布局与压缩纪律、以及「不可逆 vs 可以后加」那份清单。三处漂移已就地标注：
+> ① 文中「配对靠 `req_id`」是早期命名，定稿字段是 **`callback_id`**（以 §4.6 与 `schema/pb/envelope.proto` 为准）；
+> ② §8.1 的 15 条帧头验收测试**只兑现了一部分**：往返一致、未知 flags 断开、半包等待、payload 超限、
+> `ts` 回绕与 clamp、一条 WS 消息多帧、未知方法丢弃 + 计数、Go/TS 黄金向量逐字节一致——这些都有测试；
+> **未做**的是 zstd 位（§7）、`callback_id` 重复/缺失告警（§9/§10）、模糊测试（§12）、8 字节对齐断言（§13）、
+> 半包 5 s 超时断开（§6）；
+> ③ `schema/README.md` §5 写的「帧头实现未做」已经过期，TS 与 Go 两侧都实现了。
 
 > 上级文档：[`server-engine-stack.md`](server-engine-stack.md)（§8.2 未压缩实测、§8.3 库选型）
 > 配套证据：[`../spikes/ser-compare/`](../spikes/ser-compare/) —— `bench-ts.mjs`（读写）、`compress-bench.mjs`（压缩）、`fb-evolution.mjs`（FlatBuffers 的 struct 冻结）
@@ -11,7 +28,7 @@
 - **R1 · 默认全部走 protobuf。** 按数据形状选布局：**每 tick 的批量数值用 SoA（packed 数组）**，一次性的对象用 AoS（普通 message）。
 - **R2 · 每帧广播的路径以"布局"换速度，不以"换格式"换速度。** 我们自己的实测：同一份 protobuf，AoS → SoA 让**读提速 3.3×、字节降 33%**，比换到 FlatBuffers 便宜得多。
 - **R3 · 只是转发**（gate → logic、logic → client）→ **原样透传字节，不解码、不转码**。
-- **R4 · 帧头只做纯传输分帧：8 字节（压缩位 + 长度 + 发送时刻）。** 路由靠 gate 的会话表、类型靠 RPC 信封的 `method`、配对靠 `req_id`——全在 payload 里。`ts` 只做延迟统计，不参与业务判定。
+- **R4 · 帧头只做纯传输分帧：8 字节（压缩位 + 长度 + 发送时刻）。** 路由靠 gate 的会话表、类型靠 RPC 信封的 `method`、配对靠 `callback_id`——全在 payload 里。`ts` 只做延迟统计，不参与业务判定。
 
 **为什么不给 FlatBuffers 留位置（这是我们自己的实测推翻了初稿）：**
 
@@ -134,7 +151,7 @@ flowchart LR
 
 1. **gate 保存 entity 的路由信息**（连接 → 会话/entity），所以帧头**不需要目标标识**——路由不是帧头的活。
 2. **走 RPC**：`callEntity<rsp>("method_name", req)`，**方法名在 payload 里**，所以帧头**不需要消息类型**。
-3. **不需要每帧序号**：请求-响应配对是 RPC 层的事（`req_id` 在信封里），不是传输层的事。
+3. **不需要每帧序号**：请求-响应配对是 RPC 层的事（`callback_id` 在信封里），不是传输层的事。
 
 于是帧头只回答一个问题：**这一坨字节在哪里结束、要不要先解压。**
 
@@ -149,7 +166,7 @@ flowchart LR
 | **发送时刻（时间戳）** | ✅ | **`ts`（u32，单调毫秒）**——只用于延迟统计与回放，见 4.4 的纪律 |
 | 消息类型 / 方法名 | ❌ | RPC 信封的 `method` 字段（payload 内） |
 | 路由目标（entity） | ❌ | gate 的会话表（连接 → entity） |
-| 请求-响应配对 | ❌ | RPC 信封的 `req_id` |
+| 请求-响应配对 | ❌ | RPC 信封的 `callback_id` |
 | 优先级 | ❌（可选 1 bit） | 若真需要，用 `flags` 的空位；但别指望 gate 解析 payload |
 | 版本 | ❌ | 握手时协商一次，不进每帧 |
 | 扩展块 / nonce / acks | ❌ | 要加就加信封字段；传输层要 ack 就包在帧头外面 |
@@ -312,7 +329,7 @@ message CancelMatch { uint64 operation_id = 1; }   // 一个普通的业务方�
 
 ### 4.7 这个设计带来的三个必答题
 
-1. **`req_id` 必须有。** `callEntity<rsp>` 返回 Promise ⇒ 同一连接上必然有多个请求在途（打开一个面板就要发 3 个查询）。靠"严格 FIFO 响应"在超时与乱序面前排障会非常痛苦。→ 放信封字段 1。
+1. **`callback_id` 必须有。** `callEntity<rsp>` 返回 Promise ⇒ 同一连接上必然有多个请求在途（打开一个面板就要发 3 个查询）。靠"严格 FIFO 响应"在超时与乱序面前排障会非常痛苦。→ 放信封字段 1。
 2. **`method` 是字符串，但接口只有三个函数。** 线上保持可读的方法名（schema 不定义），收发两端靠**同一套三函数 API**，不需要 RpcMap、不需要 name→id 表（`rpc_list` 已删，那张表迟早会和 schema 漂移）：
 
 ```ts
@@ -486,8 +503,8 @@ register("entity.attack", (req) => rsp): void
 | 6 | 半包超时 5 s | 断开 |
 | 7 | `flags` bit0=1 但 payload 不是合法 zstd | 断开（数据损坏，不静默当明文） |
 | 8 | `Envelope.method` 不在本端 `RpcMap` 里 | **丢弃 + 计数，不断开**（前向兼容：新推送老客户端要无感忽略） |
-| 9 | `Envelope` 的 `req_id` 重复 | 计数 + 告警（客户端 bug，不是攻击） |
-| 10 | `Envelope` 缺 `req_id`（=0）却是响应 | 丢弃 + 告警 |
+| 9 | `Envelope` 的 `callback_id` 重复 | 计数 + 告警（客户端 bug，不是攻击） |
+| 10 | `Envelope` 缺 `callback_id`（=0）却是响应 | 丢弃 + 告警 |
 | 11 | 一个 WebSocket 消息里塞 3 帧（批量） | 三帧按序解析，字节边界不串 |
 | 12 | 随机字节模糊测试（10 万次） | 零崩溃、零越界、错误分类正确 |
 | 13 | 帧头 8 字节 + payload 的偏移对齐 | payload 起始地址 **8 字节对齐**（用 `Buffer.byteOffset` / Go 切片底层数组验证） |

@@ -1,4 +1,18 @@
+---
+id: meter-engine-choice
+type: architecture-design
+title: 引擎选型与更正记录（Cocos 定稿前的对照）
+status: draft
+parent: meter-goal
+---
+
 # MMORPG 引擎选型：Stride / Godot / Unity 在四个硬缺口上的对照
+
+> **规格图采纳说明**：客户端引擎**定稿为 Cocos Creator**（TS），因此本文 §0 的结论、
+> §7「C# 约束下的候选集」与 §8「若服务端用 abelkhan」都**退化为条件命题**，不是我方路径。
+> 保留本文是因为三样东西仍然在用：§2 的四缺口对照矩阵、§3「该比什么」的重排，
+> 以及 §6 的更正记录（Godot 没有 “Linux Server” 导出模板）与附录 B 的未核实清单。
+> 读到这里的任何人请注意：**这不是当前选型结论，是一份被推翻过程的可核查记录。**
 
 > 配套文档：[`mmorpg-verification-plan.md`](mmorpg-verification-plan.md)（四个必须实测的实验）
 > 上级文档：[`ai-native-game-engine.md`](ai-native-game-engine.md)
