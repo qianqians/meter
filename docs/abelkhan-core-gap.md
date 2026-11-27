@@ -5,15 +5,11 @@
 > **全部剔除**，一条不计。剩下的比较对象是：传输、接入、会话、路由、实体生命周期、调用语义、
 > 跨节点、顶号/重连/迁移、持久化、服务发现、可观测性、客户端 SDK、基础设施。
 >
-> **快照**：abelkhan `bc70034`（2026-11-24「迁移和顶号」），meter `aba35b0`（2026-11-27）。
+> **快照**：abelkhan `bc70034`（2026-11-24「迁移和顶号」）。
+> **本清单已按当前 meter（`33b05a3`）复核过一轮**：§1 的行判定就是现状；§2 的逐项分析、§4 的排序
+> 保留为**快照时**的记录（部分"现在没有"的句子已过时，以 §1 与 §7 为准）。
 > 结论都给了文件位置，可逐条复核。**abelkhan 侧只看能力有无，不评价其质量**——它的已知质量问题
 > 单列在 §5，免得把"它做错了"误读成"我们不用做"。
->
-> **已落地**：§4 的 P0-1（每实体串行队列 + `fence()`，见 [`../core/SPEC.md`](../core/SPEC.md)
-> 「执行模型」）、P0-2（`NotifyConnID` / `LoginResult` / 心跳回包 / 空帧 pong，见
-> [`../gate/SPEC.md`](../gate/SPEC.md) 的不变量）、P0-3（同节点复用旧实体、跨 gate 会话目录与跨节点
-> 退役，见 [`../core/SPEC.md`](../core/SPEC.md)「会话与顶号」）。下面描述 meter 现状的句子按快照读，
-> 这三项以模块 SPEC 为准。
 
 ---
 
@@ -44,33 +40,33 @@ abelkhan 整齐**，这五项不用补，补了是倒退。
 |---|---|---|---|---|
 | 1 | 对外 WS / 对内 TCP | Kestrel `UseHttps(pfx)`（**有 TLS**）；对内明文 TCP | 对外 WS（`tls_cert_file` 只校验不监听）；对内 TCP；逻辑层**主动连入** | 🟡 缺 WSS 监听 |
 | 2 | 分帧 | 4 字节小端长度前缀，64 KB 硬上限，WebSocket 里又套一层 | 8 字节帧头 `flags｜len:u24｜ts:u32`，两端逐字节一致 + 黄金向量 | ⭐ meter |
-| 3 | 心跳 / 空闲清理 | `HeartBeats{}` + gate 10s / hub 8s 超时扫描 | `HeartBeat` 只透传（逻辑层忽略）；WS 固定 90s 读超时 | ❌ |
+| 3 | 心跳 / 空闲清理 | `HeartBeats{}` + gate 10s / hub 8s 超时扫描 | `HeartBeat` 由 gate 答 `HeartBeatResult`、空帧 pong；**但没有空闲扫描**——只有 WS 90s 读超时 | 🟡 |
 | 4 | 会话表 | gate `_clients`（userId 线性查）+ `Client._dictEntityNetwork` | `conn ⇄ (user, entity, node)` 双向 O(1) + `Rebind` | ✅（meter 略好） |
 | 5 | 服务级路由 | `service_name` → `_services` 字典，请求按服务分发 | `service_name` 字段有，gate 写死 `"auth"`，逻辑层无服务表 | 🟡 |
 | 6 | 实体生命周期下行 | create / createRemote / deleteRemote / refresh / kickOff | 同左，`gate/internal/hub/logic.go` 全部实现 | ✅ |
 | 7 | 组播 / 广播 | `Group`（clients + entities + players），global 全服扇出 | `Group`（按 conn 去重）+ `global.rpcNotify`，Envelope 只 marshal 一次 | ✅ |
-| 8 | **实体串行调度** | `Actor`：每实体一条串行队列，自调度 claim 协议，异常隔离 | 无。`server.dispatch` 直接 `await e.dispatch(...)` | ❌ **架构级** |
+| 8 | **实体串行调度** | `Actor`：每实体一条串行队列，自调度 claim 协议，异常隔离 | `src/actor.ts`：每实体串行队列 + `fence()` + `close()`，`dispatch` 只入队 | ✅ |
 | 9 | 调用语义 | `WRpc` + 委托字典；**无超时清理**，`err_msg` 是字符串 | 三函数 + `callback_id` 配对 + `TIMEOUT`/`NOT_FOUND`/`UNKNOWN` + 错误码 | ⭐ meter |
 | 10 | **可靠投递 + ack** | hub 赋 `seq` → Redis list → gate 队头比对 + 64 桶串行 ack + 10s 超时重投 | 无（协议有 `AckReliable`，无 `HubNotifyClientMq`、无 seq、无重投） | ❌ |
-| 11 | **跨节点通道** | `hub_hub_{hubId}_mq`（Redis list）+ `HubHubNotifyEntity`，能跑 | `CrossCallNotify` 一条消息，**无实现、无传输、无所有权表** | ❌ |
+| 11 | **跨节点通道** | `hub_hub_{hubId}_mq`（Redis list）+ `HubHubNotifyEntity`；好友/聊天/公会也走它 | NATS `hub_{nodeId}_mq` + `HubSessionReplaced`（顶号）已通；`CrossCallNotify`（跨实体调用）**仍无实现**，也没有实体所有权表 | 🟡 |
 | 12 | **顶号** | 复用/新建 → Redis Lua `session:{user}` 占位 → 同 hub 踢 / 跨 hub `HubSessionReplaced` → 旧实体 Save + 摘除 | 同节点：`rebind` 复用旧对象；跨节点：`hub.claimUser` 占位 + `HubSessionReplaced` 让旧节点退役；gate 把挤出的会话投对节点并带错误码 4 | ✅（状态不搬运） |
 | 13 | 断线重连 | 客户端 SDK 完整（退避重连 + 重同步 + 未认领删除）；服务端只换 `Client`，不重发实体 | `GateForwardClientRequestReconnect` 已转发，逻辑层**计数后丢弃** | ❌ |
 | 14 | **迁移** | 六阶段：切割(fence)→落地(Save)→重建(Load+replay)→转尾→墓碑静默→gate re-point；失败回滚 | 协议里明确删掉 `TransferPrepare/Commit`（改为"落库→按 key 重新加载"），代码 0 行 | ❌ |
-| 15 | 持久化 | `MongoProxy` + `Player.Save()`（但恒成功、从未被调用） | `core/src/storage/`：`Document<T>` + PG jsonb + 版本 CAS + Redis 缓存 + 两个写盘间隔；**未接生命周期** | 🟡 |
+| 15 | 持久化 | `MongoProxy` + `Player.Save()`（但恒成功、从未被调用） | `core/src/storage/`：`Document<T>` + PG jsonb + 版本 CAS + Redis 缓存 + 两个写盘间隔；**未接生命周期**（登录/下线/定时/迁移前都还没调它） | 🟡 |
 | 16 | 服务发现 | gate/hub 都注册；hub watch consul 自动连 gate；**下线不处理** | gate 注册 + TTL 心跳 + 状态 note + 优雅注销；逻辑层**手填 host:port**，不发现 | 🟡 |
-| 17 | 全局实体 | `GlobalEntity`（可存盘的全局单例） | 只有 `global.rpcNotify` 广播助手，无全局实体概念 | 🟡 |
+| 17 | 全局实体 | `GlobalEntity`（可存盘的全局单例） | 只有 `global.rpcNotify` 广播助手，无全局实体概念 | ❌ |
 | 18 | 定时器 | `TimerService`：tick / 日 / 周 / 月 / 循环日 / 循环周，主循环 16ms Poll | 无（业务只能 `setTimeout`） | ❌ |
-| 19 | 观测 | Prometheus `/metrics` + OTLP trace + 真 `/health`（主循环存活 + 依赖探针） | consul note 里一串计数 + 日志；**无 `/metrics`、无 `/health`、无 trace** | ❌ |
+| 19 | 观测 | Prometheus `/metrics` + OTLP trace + 真 `/health`（主循环存活 + 依赖探针）+ 慢调用日志 | `hub.Stats()` 计数器 + consul note；**无 `/metrics`、无 `/health`、无 trace、无慢调用日志**；`log.*` 配置项一个都没生效 | ❌ |
 | 20 | GM / 后台 | admin HTTP：大盘 / 玩家 / 支付 / GM 队列 / 邮件 | 无 | ❌ |
 | 21 | 客户端 SDK | C#：帧、重连退避、KickOff 不重连、实体重同步、可靠消息 ack、每实体串行队列 | 只有服务端 `Transport` 接口；Cocos 侧 0 行 | ❌ |
 | 22 | 优雅停机 | gate/hub 都只是 `_isRun=false` + 关监听（不排空、不落盘、不注销） | gate：deregister + `httpSrv.Shutdown` + 摘节点；逻辑层无排空 | 🟡 |
 | 23 | 配置 | `args[0]` 读 JSON，无默认值合并/校验/热更 | 结构体即文档 + `-dump-config` 往返 + 启动校验 | ⭐ meter |
 | 24 | 消息队列旁路 | 无（全靠 Redis list） | NATS `entity_{id}_gate_mq` / `_{id}_logic_mq`，订阅随会话生命周期 | ⭐ meter |
 
-**计数**：⭐ meter 反超 4 项（分帧、调用语义、配置、NATS 旁路），✅ 对齐 3 项（会话表、实体生命周期、
-组播/广播），🟡 半成品 6 项（WSS、服务级路由、顶号、服务发现、全局实体、优雅停机），❌ 缺失 11 项。
-❌ 里真正属于"框架必须补"的是 #8 #10 #11 #13 #14 #15 #18 #19 #21 这 9 项；#3（心跳/空闲清理）
-属于接入层加固，#20（GM/后台）属于运维面，可以晚做。
+**计数（本轮复核后）**：⭐ meter 反超 **4**（分帧、调用语义、配置、NATS 旁路），✅ 对齐 **5**（会话表、
+实体生命周期、组播/广播、实体串行调度、顶号），🟡 半成品 **7**（WSS、服务级路由、心跳空闲清理、
+跨节点通道、持久化、服务发现、优雅停机），❌ 缺失 **8**（可靠投递、断线重连、迁移、全局实体、
+定时器、观测、GM 后台、客户端 SDK）。剩余逻辑按优先级列在 §7。
 
 ---
 
@@ -292,3 +288,83 @@ meter：定稿 PostgreSQL + "存储访问下沉为 hub 内的一个模块，不�
 - 同一节的「`TakeOverUser`（同账号抢连接）」按 §3 的路线**不做成独立消息**，
   由客户端重新请求 `GateForwardClientRequestService` 承载；需要补的是目录、退役钩子与登录回包，
   不是一条 `TakeOverUser`。
+
+---
+
+## 7. 复查（2026-11-27）：还差哪些逻辑
+
+按"补完能让什么成立"排序。每条写清三件事：现在有什么、缺的是哪段逻辑、abelkhan 有没有（有没有都不
+等于该照抄，§5 仍然有效）。
+
+### 7.1 存储接线 —— 其他三项都依赖它
+
+- **有**：`core/src/storage/`（`Document<T>` / PG jsonb / 版本 CAS / Redis 缓存 / 周期写盘 / `failFast`）。
+- **缺（纯框架逻辑）**：登录 `load` → 交给 `onPlayerCreate`；`onPlayerDestroy`（`disconnect` / `replaced`）
+  → `save`；`startAutoFlush` 接进 server 生命周期；**跨节点顶号的新节点 `load` 同一份状态**（现在只是
+  退役 + 重建，状态丢）。
+- **abelkhan**：`Player.Save()` 存在但从未被调用，`MongoProxy` 恒返回 true——它也没做完。
+- **验收**：断线重连、跨节点顶号后，HP / 背包与掉线前一致。
+
+### 7.2 断线重连 —— 玩家能感知的第一个缺陷
+
+- **有**：`Reconnect` 消息、gate 转发 `GateForwardClientRequestReconnect`、`ClientDisconnect{error}`、
+  `userId → entity` 索引、`Entity.rebind()`、多 gate 寻址。
+- **缺**：`resume_token`（gate 签发 + 无状态校验，HMAC）+ `ReconnectResult`；逻辑层凭 token 复用实体并
+  **重发 `CreatePlayerEntity`**；`full_resync` 判定；重连期间旧会话的 `entity/节点` 保留到逻辑层确认。
+- **abelkhan**：客户端 SDK 全套（退避重连 + 未认领实体删除），服务端只替换 `Client`——半成品。
+- **验收**：断网 5 秒后重连，拿到同一个 `entity_id`，状态不丢、不重复建实体。
+
+### 7.3 定时器 —— 玩法地基
+
+- **有**：storage 的 `startAutoFlush`（只用于写盘）。
+- **缺**：逻辑层的 tick 源（每实体 / 每场景）、日 / 周 / 循环触发。没有它，buff、刷新、活动、离线结算
+  都写不出来。
+- **abelkhan**：`TimerService`（tick / 日 / 周 / 月 / 循环日 / 循环周，主循环 16ms Poll）。
+
+### 7.4 可靠投递 + ack —— "人不在线也要送到"的前提
+
+- **有**：协议里的 `AckReliable`。
+- **缺**：`HubNotifyClientMq{seq}`（`gate_logic.proto`）、gate 侧队列（队头比对 / 超时重投 / 去重）、
+  逻辑层分配 seq。邮件、好友、跨服确认这类能力都建在它上面。
+- **abelkhan**：完整一套（seq → Redis list → 队头比对 → 64 桶串行 ack → 10s 重投），可直接参照语义。
+
+### 7.5 迁移（换场景 / 换线）
+
+- **有**：`fence()`、会话目录、节点总线、存储模块（未接线）。
+- **缺**：触发（admin / 排水 / 场景切换）、状态交接（落库 → 重载）、gate re-point、失败回滚与墓碑期。
+- **现状**：跨节点顶号是它的退化版——要求客户端重新登录，且不搬状态。
+- **依赖**：7.1（状态）+ 7.2（"重新登录 = 迁移"这条路线）。
+
+### 7.6 观测与日志落地
+
+- **缺**：`/health`（主循环存活 + PG/Redis 依赖探针）、`/metrics`（gate 的 `Stats()` 已经现成）、
+  慢调用日志、trace id 透传。另外 gate 的 `log.dir` / `file_name` / `level` / `max_size_mb` **四个配置项
+  一个都没生效**（现在还是 stdlib `log` 直出 stderr）——这是"配置写了但没接"的漂移。
+- **abelkhan**：Prometheus + OTLP + `ServiceHealth`（主循环存活 + 依赖探针）+ 慢调用日志。
+
+### 7.7 优雅停机与排空
+
+- **有**：gate 注销 consul + `httpSrv.Shutdown`；`GateDrain` 消息（gate 侧处理）。
+- **缺**：逻辑层主动排空（拒绝新会话 → 等在途 → 全量存盘 → 通知 gate re-point）；停机时在途会话怎么收尾。
+
+### 7.8 拓扑与运维（可以晚，但少一块都不完整）
+
+- **逻辑层服务发现**：现在每台 gate 都要手工 `connectGate`；新增/下线 gate 要改逻辑层配置。abelkhan
+  是 watch consul 自动连（但它只加不减）。
+- **全局实体**：跨场景单例（世界 boss、全局计数）——meter 只有 `global.rpcNotify` 广播，没有实体。
+- **GM / 后台最小面**：在线数、踢人、封禁、补发、查档。
+- **客户端 SDK**：Cocos/TS 的帧、信封、`RpcMap`、重连、实体重同步、ack——abelkhan 有 C# 版可参照，
+  meter 一行都没有。
+
+### 7.9 接入层加固（与 abelkhan 差距不大）
+
+- **WSS 监听**：证书配置已校验，但没有 TLS listener（abelkhan 有 Kestrel + pfx）。
+- **心跳驱动的空闲清理**：现在只有 90s 读超时，半死连接占资源 90s；abelkhan 是 10s / 8s 扫描。
+- **限流 / 背压 / 写缓冲上限**：abelkhan 也没有。
+- **压缩**：`flags` 的 zstd 位两端都没接（abelkhan 也没接）。
+
+### 一句话
+
+骨架（路由 · 调度 · 顶号 · 会话目录 · 节点总线 · 存储模块）已经对齐，部分反超；剩下的是**闭环**：
+把存储接进生命周期、把重连补上、给逻辑层一条时间轴（定时器）、给消息一条送达保证（可靠投递），
+然后才是迁移与运维。
