@@ -155,9 +155,10 @@ describe('rpcRequest / rpcNotify：实体 → 客户端', () => {
     e.destroy();
     await expect(p).rejects.toMatchObject({ code: ERR.NOT_FOUND });
     expect(destroyed).toBe(true);
-    // handler 已清：再 dispatch 只会记 unknownMethod
+    // 已销毁：新调用在入队前就被挡掉（不再走 handler 表）
     await e.dispatch('entity.attack', new Uint8Array(0), { connId: 'c1' }, false);
-    expect(e.stats.unknownMethod).toBe(1);
+    expect(e.stats.closed).toBe(1);
+    expect(e.stats.unknownMethod).toBe(0);
   });
 });
 
@@ -205,5 +206,82 @@ describe('forwardCallClient 工具', () => {
     expect(body.connId).toBe('c9');
     expect(body.entityId).toBe('e1');
     expect(body.method).toBe('m');
+  });
+});
+
+// ---------------- 执行模型：每实体串行（actor.ts） ----------------
+
+const tick = () => new Promise<void>((r) => setTimeout(r, 0));
+
+describe('执行模型：同一实体串行', () => {
+  it('第一个调用在等外部事件时，第二个不许开始；完成后按到达顺序继续', async () => {
+    const { down, sent } = collector();
+    const e = player(down);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const order: string[] = [];
+
+    e.registerNotify('op.slow', RefreshEntitySchema, async () => {
+      order.push('slow:start');
+      await gate;
+      order.push('slow:end');
+    });
+    e.registerNotify('op.fast', RefreshEntitySchema, () => { order.push('fast'); });
+
+    const req = toBinary(RefreshEntitySchema, create(RefreshEntitySchema, { entityId: 'x' }));
+    void e.dispatch('op.slow', req, { connId: 'c1' }, false);
+    void e.dispatch('op.fast', req, { connId: 'c1' }, false);
+
+    await tick();
+    expect(order).toEqual(['slow:start']); // 第一条没完成，第二条排队
+
+    release();
+    await e.fence();
+    expect(order).toEqual(['slow:start', 'slow:end', 'fast']);
+    expect(sent.length).toBe(0);
+  });
+
+  it('fence 等到已入队的调用跑完', async () => {
+    const { down } = collector();
+    const e = player(down);
+    let done = false;
+    e.registerNotify('op.a', RefreshEntitySchema, async () => {
+      await new Promise<void>((r) => setTimeout(r, 5));
+      done = true;
+    });
+
+    void e.dispatch('op.a', toBinary(RefreshEntitySchema, create(RefreshEntitySchema, {})), { connId: 'c1' }, false);
+    expect(done).toBe(false);
+
+    await e.fence();
+    expect(done).toBe(true);
+    expect(e.pendingJobs).toBe(0);
+  });
+
+  it('destroy：丢弃排队中的调用（不回包），之后到达的调用只计数', async () => {
+    const { down, sent } = collector();
+    const e = player(down);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    e.registerNotify('op.a', RefreshEntitySchema, async () => { await gate; });
+    e.register('op.b', RefreshEntitySchema, RefreshEntitySchema, () =>
+      create(RefreshEntitySchema, { entityId: 'b' }));
+
+    const req = toBinary(RefreshEntitySchema, create(RefreshEntitySchema, {}));
+    void e.dispatch('op.a', req, { connId: 'c1' }, false);
+    const queued = e.dispatch('op.b', req, { connId: 'c1' }, true, 3); // 排队中
+
+    e.destroy();
+
+    await expect(queued).resolves.toBeUndefined(); // dispatch 永不 reject
+    expect(e.isClosed).toBe(true);
+    expect(e.pendingJobs).toBe(0);
+    expect(sent.length).toBe(0); // 被丢弃的 REQUEST 不回包
+
+    void e.dispatch('op.b', req, { connId: 'c1' }, true, 4);
+    await e.fence().catch(() => {}); // 已关闭：fence reject（这里吞掉）
+    expect(e.stats.closed).toBe(1);
+
+    release();
   });
 });

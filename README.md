@@ -27,6 +27,8 @@ Creator。**规格的权威记录在 [`goal-and-requirements.md`](goal-and-requi
 - **[`docs/protocol-map.md`](docs/protocol-map.md)** — 协议分工（**v4**）：全部走 protobuf，热路径用 **SoA 布局**换速度而不是换格式（585 → 176 ns/实体；FB 剩下的优势只有 4 µs/帧 = 0.03% 帧预算）；压缩实测（zstd 后 FB 比 pb SoA 只差 **5%**，brotli 压缩率更好但 30 KB 要 **43 ms**，不可用）；**8 字节帧头**（`flags u8 + len u24 + ts u32`，语义全在 RPC `Envelope` 里；`ts` 是单调毫秒、逐跳覆盖、只做诊断）；P0–P4 路线与 15 条帧头验收测试；重新评估 FB 的量化触发
 - **[`docs/server-engine-stack.md`](docs/server-engine-stack.md)** — 服务端技术栈：需求 V1→V6 的收敛史、分层与"每层禁止做什么"、三条 CI 硬规矩；§3 是本机实测（纯 Python 比 V8 慢**约 80×**、天花板三方重合；TS 侧 序列化 **130×** > 遍历/分配 **7×** > 调用点 **5.2×** > 布局 **3.55×**）；§4 TS 工程纪律（擦除≠转换、ESM 无真热更）；§6 把它与 `mmorpg-engine-choice.md` §8 的 abelkhan 结论对齐（**§8 的前提已被改写**）；§7 十条未核实、§8 五个 spike（S1/S2 已执行）+ §8.3「TS 侧用哪个 protobuf 库」
 
+另有**对照清单**（不是设计文档）：**[`docs/abelkhan-core-gap.md`](docs/abelkhan-core-gap.md)** — 剔除 bag/chat/friend/guild/leaderboard/mail/quest/shop 后，逐项对比 abelkhan 的核心框架能力（24 项总表、五个重点缺口、顶号/迁移按"客户端重新请求 `GateForwardClientRequestService`"落地的时序与最小补齐件），并单列一份"它有但不该照搬"的质量坑。
+
 ### 文档的三个中心论点
 
 1. **"基于 AI 的游戏引擎"是三个不同的东西**，混为一谈是这个词最大的问题：

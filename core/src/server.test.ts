@@ -242,3 +242,52 @@ describe('global 广播', () => {
     expect([...body.content]).toEqual([1, 2]);
   });
 });
+
+describe('执行模型：同一实体的两个 REQUEST 串行', () => {
+  it('第一个 handler 未完成时第二个不开始，完成后按到达顺序执行', async () => {
+    const g = fakeGate();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const order: string[] = [];
+
+    createLogicServer({
+      transport: g.logicSide, nodeId: 'n1',
+      onLogin: () => ({ ok: true, userId: 'u1', entityId: 'e1', entityType: 'player', content: new Uint8Array() }),
+      onPlayerCreate: (p) => {
+        p.register('entity.slow', RefreshEntitySchema, RefreshEntitySchema, async () => {
+          order.push('slow:start');
+          await gate;
+          order.push('slow:end');
+          return create(RefreshEntitySchema, { entityId: 'e1' });
+        });
+        p.register('entity.fast', RefreshEntitySchema, RefreshEntitySchema, () => {
+          order.push('fast');
+          return create(RefreshEntitySchema, { entityId: 'e1' });
+        });
+      },
+    });
+
+    g.push({ msgType: MsgType.MSG_REQUEST, method: 'gate.clientLogin', body:
+      toBinary(GateForwardClientRequestServiceSchema, create(GateForwardClientRequestServiceSchema, {
+        serviceName: 'auth', gateName: 'g1', connId: 'c1', content: loginBytes(),
+      })) });
+    await g.waitIdle();
+
+    const call = (method: string, callbackId: number) => {
+      const content = toBinary(RefreshEntitySchema, create(RefreshEntitySchema, { entityId: 'x' }));
+      g.push({ msgType: MsgType.MSG_REQUEST, method: 'gate.clientRequest', callbackId, body:
+        toBinary(ClientRequestHubSchema, create(ClientRequestHubSchema, {
+          connId: 'c1', entityId: 'e1', content, method,
+        })) });
+    };
+
+    call('entity.slow', 1);
+    call('entity.fast', 2);
+    await g.waitIdle();
+    expect(order).toEqual(['slow:start']); // 第二个被队列挡住
+
+    release();
+    await g.waitIdle();
+    expect(order).toEqual(['slow:start', 'slow:end', 'fast']);
+  });
+});

@@ -46,5 +46,7 @@ tags: [protocol, protobuf]
 
 ## 已知缺口
 
-作者在 [`README.md`](README.md) §1.3 自己列了三条**当前协议缺的机制**：可靠投递 + ack（`seq`）、实体
-生命周期控制面（创建/销毁/刷新远程实体）、`TakeOverUser`（同账号抢连接的原子路径）。它们的优先级未被确认。
+[`README.md`](README.md) §1.3 的三条已不算同一个状态：**可靠投递 + ack（`seq`）仍缺**；实体生命周期
+控制面**已补**（`gate_logic.proto` + `gate/internal/hub/logic.go`）；`TakeOverUser` **不做成独立消息**——
+顶号/迁移由客户端重新请求 `GateForwardClientRequestService` 承载。逐项对照与优先级见
+[`../docs/abelkhan-core-gap.md`](../docs/abelkhan-core-gap.md)。

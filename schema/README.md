@@ -47,13 +47,13 @@ message Msg { oneof payload { Request req = 1; Response rsp = 2; Notify notify =
 
 实体生命周期另有客户端侧的一半在 `client.proto`：`CreatePlayerEntity` / `CreateRemoteEntity` / `DeleteRemoteEntity` / `RefreshEntity` / `NotifyConnID`。
 
-### 1.3 我们该偷的三件事（当前 `schema/pb/` 缺）
+### 1.3 我们该偷的三件事（当前状态）
 
-| # | 机制 | 为什么必须补 |
+| # | 机制 | 状态 |
 |---|---|---|
-| 1 | **可靠投递 + ack**：`HubNotifyClientMq{seq}` + 客户端回 `AckReliabilityMsg{seq}`，gate 按 seq 校验"这条 ack 对应的是不是队列头" | 聊天/邮件/好友确认这类**跨服、可离线**的消息需要"至少一次 + 去重"。我们现在只有 `DeliverDownstream`，没有投递保证 |
-| 2 | **实体生命周期控制面**：`CreatePlayerEntity` / `CreateRemoteEntity` / `DeleteRemoteEntity` / `RefreshEntity` | 我们在 `gate_logic.proto` 只有会话绑定/解绑，没有"进入视野的远程实体如何创建/销毁"这层；这是 AOI 之外的第二条同步通道 |
-| 3 | **`TakeOverUser`（抢人）** | 同账号在新 gate 登录时，让旧 gate 让位并清理会话。我们只有 `DUPLICATE_LOGIN` 错误码 + `KickSession`，缺少"接管"这条原子路径 |
+| 1 | **可靠投递 + ack**：`HubNotifyClientMq{seq}` + 客户端回 `AckReliabilityMsg{seq}`，gate 按 seq 校验"这条 ack 对应的是不是队列头" | **仍缺**。协议里只有 `AckReliable` 这一条客户端消息，`gate_logic.proto` 没有 `HubNotifyClientMq`、没有 seq、没有重投。差异见 [`../docs/abelkhan-core-gap.md`](../docs/abelkhan-core-gap.md) §2.4 |
+| 2 | **实体生命周期控制面**：`CreatePlayerEntity` / `CreateRemoteEntity` / `DeleteRemoteEntity` / `RefreshEntity` | **已补**。`gate_logic.proto` 有 `HubCreatePlayerEntity` / `HubCreateRemoteEntity` / `HubDeleteRemoteEntity` / `HubRefreshEntity`，`gate/internal/hub/logic.go` 全部落地 |
+| 3 | **`TakeOverUser`（抢人）** | **不做成独立消息**。顶号/迁移统一由客户端重新请求 `GateForwardClientRequestService` 承载；要补的是会话目录、旧实体退役钩子与登录回包，不是一条 `TakeOverUser`。时序见 [`../docs/abelkhan-core-gap.md`](../docs/abelkhan-core-gap.md) §3 |
 
 ### 1.4 我们比它强的地方（不改）
 

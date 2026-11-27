@@ -1,5 +1,9 @@
 // 逻辑服装配：上行分派 + 实体/组管理 + global 广播（参考 abelkhan hub/MainClass 的 GateMsgHandle）。
 //
+// **执行模型**：`gate.clientRequest` 只是把调用交给实体的 Actor 队列（entity.ts / actor.ts），
+// 同一实体严格串行、不同实体互不等待。所以这里的 `dispatch` 不再 await 实体处理——
+// 它只负责"找到实体 + 入队"。
+//
 // 上行（gate → 逻辑）分派表：
 //   gate.clientLogin      → onLogin 决策 → hub.createPlayerEntity + 建玩家实体 / hub.kickOffClient
 //   gate.clientRequest    → 按 entity_id 分派（REQUEST 回包 / NOTIFY 不回），entity 不存在回 NOT_FOUND
@@ -213,7 +217,9 @@ export function createLogicServer(opts: LogicServerOptions) {
           return;
         }
         const ctx: CallContext = { connId: body.connId };
-        await e.dispatch(body.method, body.content, ctx, needsReply, env.callbackId);
+        // 只入队、不等它跑完：同一实体的顺序由它的 Actor 队列保证；这里 await 只会让
+        // 一个慢 handler 变成这条链路上后续帧的等待（而帧是各自分派的，等它没有意义）。
+        void e.dispatch(body.method, body.content, ctx, needsReply, env.callbackId);
         return;
       }
 

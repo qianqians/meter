@@ -1,12 +1,12 @@
 # core —— 逻辑层的运行时骨架（第一行真代码）
 
-目前只有两个文件，但它们把协议落到了可执行的形状上：
+协议与执行模型落在几个小文件上：
 
 | 文件 | 内容 |
 |---|---|
 | [`src/frame.ts`](src/frame.ts) | **8 字节帧头**编解码（`flags:zstd | len:u24 | ts:u32`）、半包处理、`oneWayDelayMs()`（有符号差值处理 49.7 天回绕 + 异常时钟 clamp） |
 | [`src/rpc.ts`](src/rpc.ts) | **RPC 三函数**：`callEntity` / `callGroup` / `register`，信封装配、`callback_id` 配对、超时、未知方法丢弃+计数 |
-| [`src/rpc.test.ts`](src/rpc.test.ts) | 10 条验收测试（内存传输，无网络） |
+| [`src/actor.ts`](src/actor.ts) | **每实体串行队列**：`post` / `call` / `fence` / `close`。同一实体严格串行，`fence()` 是顶号/迁移的切割点（见 [`SPEC.md`](SPEC.md)「执行模型」） |
 
 ## 跑
 
@@ -14,7 +14,7 @@
 cd schema && ./check.sh    # 先出 codegen（生成到 core/src/gen/，已 gitignore）
 cd ../core
 npm install                # 首次
-npm test                   # vitest：48 条
+npm test                   # vitest：63 条
 npm run typecheck          # tsc --noEmit
 npm run e2e                # 全链路：先 cd ../gate && go build -o ../core/scripts/gate-e2e.exe ./cmd/gate
 ```
@@ -50,6 +50,9 @@ rpc.register('entity.attack', AttackRequestSchema, AttackResultSchema,
 - handler 抛错：回 `UNKNOWN` 且错误文案带回
 - 超时：按配置抛 `TIMEOUT` 并清掉在途记录
 - 迟到响应（回调 id 已不存在）：静默丢弃，不炸
+- Actor：同一实体的调用严格串行（第一个在等外部事件时第二个不开始）、job 抛错不影响后续、
+  并发恰好一次、`fence()` 只覆盖调用那一刻已入队的调用、`close()` 丢弃排队中的并把等待方 reject
+- 实体销毁：排队中的调用被丢弃（不回包），之后到达的调用计入 `stats.closed`
 
 ## 还没做的
 
@@ -94,6 +97,9 @@ scene.rpcNotify('scene.chat', toBinary(ChatSchema, msg), { from: player.id });
 
 // 全服广播
 server.global.rpcNotify('server.notice', toBinary(NoticeSchema, n));
+
+// 切割点：这一刻已入队的调用全部跑完后 resolve（顶号/迁移用；不要在 handler 里 fence 自己）
+await player.fence();
 ```
 
 **上行分派表**（gate → 逻辑服，server.ts 内部）：

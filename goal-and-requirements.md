@@ -37,8 +37,9 @@ TCP（内网）/ 对外 WebSocket（客户端走 WSS 接入）。
 
 - **框架协议**（`schema/`）：7 个 proto / 43 条消息，只描述消息、不描述方法；双端 codegen（Go 与 TS）
   + 11 条结构断言。见 [schema 模块](schema/SPEC.md)，线上形状由 [协议契约](docs/protocol-map.md) 决定。
-- **逻辑层运行时**（`core/`）：8 字节帧头、RPC 三函数、实体 / 组 / global 逻辑服、主动连入 gate 的
-  TCP 链路、NATS 旁路封装；48 条 vitest + 一条真 gate 的全链路 e2e。见 [core 模块](core/SPEC.md)。
+- **逻辑层运行时**（`core/`）：8 字节帧头、RPC 三函数、每实体串行队列（Actor）+ `fence()` 切割点、
+  实体 / 组 / global 逻辑服、主动连入 gate 的 TCP 链路、NATS 旁路封装；63 条 vitest + 一条真 gate 的
+  全链路 e2e。见 [core 模块](core/SPEC.md)。
 - **接入层**（`gate/`）：对外 WebSocket 与对内 TCP 两个监听端口、帧头切分、`conn ⇄ entity` 会话表、
   客户端 ⇄ 逻辑层双向路由（含组播去重与广播）、JSON 配置（可导出带注释的默认值）、consul 注册与
   TTL 状态上报；51 条 Go 测试 + 零依赖冒烟脚本。见 [gate 模块](gate/SPEC.md)。

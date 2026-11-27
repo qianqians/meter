@@ -9,6 +9,9 @@
 //               REQUEST 的回包经 forwardHubCallClient{RESPONSE} 发出（gate 侧原样透传）。
 //   实体 → 客户端：rpcRequest（等回包，配对靠 callbackId）/ rpcNotify（推完即忘）。
 //
+// **执行模型**：每条客户端调用先进入本实体的 `Actor` 队列（actor.ts），同一实体严格串行。
+// 为什么回包不入队、destroy 怎么处理排队中的调用，见 core/SPEC.md「执行模型」。
+//
 // 视图同步三原语（createRemoteTo / deleteRemoteFrom / refreshTo）供组视图同步使用。
 
 import {
@@ -19,6 +22,7 @@ import {
   type MessageShape,
 } from '@bufbuild/protobuf';
 
+import { Actor, ActorClosedError } from './actor';
 import { EnvelopeSchema, MsgType } from './gen/envelope_pb';
 import { ErrorCodeSchema } from './gen/common_pb';
 import {
@@ -59,6 +63,8 @@ type Handler = (req: Uint8Array, ctx: CallContext) => Uint8Array | Promise<Uint8
 export interface EntityStats {
   unknownMethod: number;
   timeout: number;
+  /** 到达时实体已销毁的调用（在入队前就挡掉）。正常为 0，>0 说明路由比销毁晚了一步。 */
+  closed: number;
 }
 
 export class RpcError extends Error {
@@ -97,6 +103,13 @@ export function forwardCallClient(
     })));
 }
 
+export interface EntityOptions {
+  connId?: string;
+  userId?: string;
+  /** 队列自身的意外异常（业务 handler 的异常已由 dispatch 转成 UNKNOWN 回包）。默认静默。 */
+  onQueueError?: (err: unknown) => void;
+}
+
 /**
  * Entity：一个逻辑实体。玩家实体的 connId 非空；怪/NPC 为空（只能收调用、不能主动发）。
  */
@@ -112,22 +125,34 @@ export class Entity {
   onDestroy?: () => void;
 
   private readonly down: Downlink;
+  private readonly actor: Actor;
   private readonly handlers = new Map<string, Handler>();
   private readonly pending = new Map<number, Pending>();
   private nextCallbackId = 1;
-  readonly stats: EntityStats = { unknownMethod: 0, timeout: 0 };
+  readonly stats: EntityStats = { unknownMethod: 0, timeout: 0, closed: 0 };
 
   constructor(
     id: string,
     type: string,
     down: Downlink,
-    opts: { connId?: string; userId?: string } = {},
+    opts: EntityOptions = {},
   ) {
     this.id = id;
     this.type = type;
     this.down = down;
     this.connId = opts.connId;
     this.userId = opts.userId;
+    this.actor = new Actor({ onError: opts.onQueueError });
+  }
+
+  /** 队列里还没开始执行的调用数（正在执行的那一条不算）；迁移与诊断用。 */
+  get pendingJobs(): number {
+    return this.actor.pending;
+  }
+
+  /** 队列是否已关闭（实体已销毁）。 */
+  get isClosed(): boolean {
+    return this.actor.closed;
   }
 
   /** 是否玩家实体（有连接、能主动调客户端）。 */
@@ -168,10 +193,35 @@ export class Entity {
   }
 
   /**
-   * 收到一条客户端调用（Server 分派进来）。
+   * 收到一条客户端调用（Server 分派进来）——**只入队**，不当场执行。
    * needsReply：REQUEST 时回包；callbackId 是客户端的配对号，回包原样带回。
+   *
+   * 返回的 Promise 在这一条 job 跑完后 resolve（调用方可等它，但 Server 不等：顺序由队列保证）。
+   * 它**永不 reject**：实体已销毁时静默计数，避免 `void dispatch(...)` 产生未处理拒绝。
    */
-  async dispatch(method: string, reqBytes: Uint8Array, ctx: CallContext, needsReply: boolean, callbackId = 0): Promise<void> {
+  dispatch(method: string, reqBytes: Uint8Array, ctx: CallContext, needsReply: boolean, callbackId = 0): Promise<void> {
+    // 实体已销毁：不再入队（路由比销毁晚了一步）。计数而不是抛错——调用方在 server 里不等它。
+    if (this.actor.closed) {
+      this.stats.closed++;
+      return Promise.resolve();
+    }
+    return this.actor
+      .call(() => this.runDispatch(method, reqBytes, ctx, needsReply, callbackId))
+      .catch((e: unknown) => {
+        if (e instanceof ActorClosedError) {
+          return; // 排队中被 close 丢弃：由 Actor.droppedCount 记账
+        }
+        throw e;
+      });
+  }
+
+  /** 切割点：**调用这一刻**已入队的调用全部跑完后 resolve；实体已销毁则 reject。 */
+  fence(): Promise<void> {
+    return this.actor.fence();
+  }
+
+  /** 队列内的真正分派（同一实体串行执行）。 */
+  private async runDispatch(method: string, reqBytes: Uint8Array, ctx: CallContext, needsReply: boolean, callbackId: number): Promise<void> {
     const h = this.handlers.get(method);
     if (!h) {
       this.stats.unknownMethod++;
@@ -186,9 +236,13 @@ export class Entity {
         this.replyOk(ctx.connId, method, callbackId, rspBytes);
       }
     } catch (e) {
-      if (needsReply) {
-        const detail = e instanceof Error ? e.message : String(e);
+      if (!needsReply) return;
+      const detail = e instanceof Error ? e.message : String(e);
+      try {
         this.replyError(ctx.connId, method, callbackId, ERR.UNKNOWN, detail);
+      } catch {
+        // 连接已断（down.send 抛错）：回包发不出去，这条调用到此为止。
+        // runDispatch 因此不会往上抛错，dispatch 的 Promise 也就不会变成未处理拒绝。
       }
     }
   }
@@ -295,8 +349,9 @@ export class Entity {
     }
   }
 
-  /** 实体销毁（Server 调）：拒绝所有在途请求、清 handler、跑清理钩子。 */
+  /** 实体销毁：关队列（丢弃排队中的调用、reject 它们）→ reject 在途 rpcRequest → 跑清理钩子。 */
   destroy(): void {
+    this.actor.close();
     for (const p of this.pending.values()) {
       if (p.timer) clearTimeout(p.timer);
       p.reject(new RpcError(`实体销毁: ${p.method}`, ERR.NOT_FOUND));
