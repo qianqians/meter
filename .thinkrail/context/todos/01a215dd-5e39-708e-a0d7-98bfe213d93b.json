@@ -1,0 +1,447 @@
+{
+  "version": 6,
+  "todos": [],
+  "groups": [
+    {
+      "id": "g_747f8989fd5f",
+      "title": "gate 性能 ①+②",
+      "todos": [
+        {
+          "id": "t_70d5ec5afefb",
+          "title": "② stats 原子化：statsCounters + atomic，去掉热路径上的 h.mu 计数锁",
+          "status": "done",
+          "origin": "agent",
+          "createdAt": "2026-11-26T10:36:38.841Z",
+          "updatedAt": "2026-11-26T10:39:49.997Z",
+          "artifacts": [
+            {
+              "kind": "change",
+              "path": "gate/internal/clientgate/ws.go"
+            },
+            {
+              "kind": "change",
+              "path": "gate/internal/hub/client.go"
+            },
+            {
+              "kind": "change",
+              "path": "gate/internal/hub/hub_test.go"
+            },
+            {
+              "kind": "change",
+              "path": "gate/internal/hub/hub.go"
+            },
+            {
+              "kind": "change",
+              "path": "gate/internal/hub/logic.go"
+            },
+            {
+              "kind": "change",
+              "path": "gate/internal/hub/marshal.go"
+            },
+            {
+              "kind": "change",
+              "path": "gate/internal/logiclink/tcp.go"
+            }
+          ]
+        },
+        {
+          "id": "t_72d737c457ec",
+          "title": "① Peer 加 SendBytes，wsPeer/tcpPeer 实现；deliverDown/组播/全服统一 marshal 一次",
+          "status": "done",
+          "origin": "agent",
+          "createdAt": "2026-11-26T10:36:38.841Z",
+          "updatedAt": "2026-11-26T10:39:49.476Z"
+        },
+        {
+          "id": "t_4a5b7db31117",
+          "title": "fakePeer 适配 + 测试回归",
+          "status": "done",
+          "origin": "agent",
+          "createdAt": "2026-11-26T10:36:38.841Z",
+          "updatedAt": "2026-11-26T10:39:49.477Z"
+        },
+        {
+          "id": "t_0e47e7822f82",
+          "title": "bench 前后对比 + e2e/smoke 回归",
+          "status": "done",
+          "origin": "agent",
+          "createdAt": "2026-11-26T10:36:38.841Z",
+          "updatedAt": "2026-11-26T10:46:12.024Z",
+          "verification": "- `go build/vet/test -race ./...` 全绿\n- bench（16 核，3 次稳定）：并行上行 914→292 ns/op（3.1× 吞吐）；组播×50 26,770→8,400 ns/op、364→71 allocs（5.1×）；全服×100 4,991→7,900 ns/op（fakePeer 现在如实计入此前被隐藏的 env marshal，真实路径每连接少 1 次 proto.Marshal + 1 次 frame.Encode）\n- e2e（重建二进制）全链路通过 ✅；smoke.py 冒烟 ✅",
+          "artifacts": [
+            {
+              "kind": "change",
+              "path": "core/scripts/gate-e2e.exe"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "g_101aac85fd1f",
+      "title": "gate 补丁：forwardHubCallClient 透传 RESPONSE",
+      "todos": [
+        {
+          "id": "t_897cd4d70b80",
+          "title": "hub.go：sendCallEntity 接收显式 msgType，RESPONSE 原样透传；group/global 固定 NOTIFY",
+          "status": "done",
+          "origin": "agent",
+          "createdAt": "2026-11-26T06:52:14.700Z",
+          "updatedAt": "2026-11-26T06:53:49.245Z"
+        },
+        {
+          "id": "t_8af96dd9dd5f",
+          "title": "hub_test 补 RESPONSE 透传用例",
+          "status": "done",
+          "origin": "agent",
+          "createdAt": "2026-11-26T06:52:14.700Z",
+          "updatedAt": "2026-11-26T06:53:49.247Z"
+        }
+      ]
+    },
+    {
+      "id": "g_26220132ab8d",
+      "title": "core 实体层",
+      "todos": [
+        {
+          "id": "t_197d8ffdf514",
+          "title": "entity.ts：register/rpcRequest/rpcNotify/createRemoteTo 等原语 + 离线测试",
+          "status": "done",
+          "origin": "agent",
+          "createdAt": "2026-11-26T06:52:14.700Z",
+          "updatedAt": "2026-11-26T06:57:42.573Z",
+          "artifacts": [
+            {
+              "kind": "change",
+              "path": "core/src/entity.test.ts"
+            },
+            {
+              "kind": "change",
+              "path": "core/src/entity.ts"
+            }
+          ]
+        },
+        {
+          "id": "t_31878c0fd363",
+          "title": "group.ts：join/leave（含视图同步）/rpcNotify + 离线测试",
+          "status": "done",
+          "origin": "agent",
+          "createdAt": "2026-11-26T06:52:14.700Z",
+          "updatedAt": "2026-11-26T06:59:30.174Z",
+          "artifacts": [
+            {
+              "kind": "change",
+              "path": "core/src/group.test.ts"
+            },
+            {
+              "kind": "change",
+              "path": "core/src/group.ts"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "g_448737a06cc0",
+      "title": "core 服务器装配",
+      "todos": [
+        {
+          "id": "t_34f4ae07fc2f",
+          "title": "server.ts：上行分派（login/request/response/disconnect）+ 实体/组管理 + global.rpcNotify + 离线测试",
+          "status": "done",
+          "origin": "agent",
+          "createdAt": "2026-11-26T06:52:14.700Z",
+          "updatedAt": "2026-11-26T07:02:34.031Z",
+          "artifacts": [
+            {
+              "kind": "change",
+              "path": "core/src/server.test.ts"
+            },
+            {
+              "kind": "change",
+              "path": "core/src/server.ts"
+            }
+          ]
+        },
+        {
+          "id": "t_3b9d248626d9",
+          "title": "gatelink.ts：TCP + 帧编解码 + logic.hello 握手包成 Transport + 本机 TCP 测试",
+          "status": "done",
+          "origin": "agent",
+          "createdAt": "2026-11-26T06:52:14.700Z",
+          "updatedAt": "2026-11-26T07:05:10.871Z",
+          "artifacts": [
+            {
+              "kind": "change",
+              "path": "core/src/gatelink.test.ts"
+            },
+            {
+              "kind": "change",
+              "path": "core/src/gatelink.ts"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "g_b21d7f54b2e0",
+      "title": "e2e + 文档",
+      "todos": [
+        {
+          "id": "t_4cd2160ae26a",
+          "title": "core/scripts/e2e.ts：真 gate + 逻辑服 + WS 客户端全链路验收",
+          "status": "done",
+          "origin": "agent",
+          "createdAt": "2026-11-26T06:52:14.700Z",
+          "updatedAt": "2026-11-26T07:13:28.154Z",
+          "verification": "- `npm run e2e`（gate-e2e.exe 真二进制 + 逻辑服 + WS 客户端）→ ①登录建实体 ②callEntity 回包闭环 ③entity.rpcRequest 配对 ④group.rpcNotify ⑤global.rpcNotify 全过\n- 过程中揪出并修复 gate 真 bug：客户端回包 Content 装的是 ClientUplink 外层字节而非 CallEntity.content",
+          "artifacts": [
+            {
+              "kind": "change",
+              "path": "core/scripts/.e2e.bundle.mjs"
+            },
+            {
+              "kind": "change",
+              "path": "core/scripts/e2e.build.mjs"
+            },
+            {
+              "kind": "change",
+              "path": "core/scripts/e2e.ts"
+            },
+            {
+              "kind": "change",
+              "path": "core/scripts/gate-e2e.exe"
+            },
+            {
+              "kind": "change",
+              "path": "gate/internal/hub/client.go"
+            }
+          ]
+        },
+        {
+          "id": "t_560abccaf054",
+          "title": "README/protocol-map 补逻辑服条目；全量验证",
+          "status": "done",
+          "origin": "agent",
+          "createdAt": "2026-11-26T06:52:14.700Z",
+          "updatedAt": "2026-11-26T07:15:34.422Z",
+          "verification": "- gate：`go build/vet/test -count=1 ./...` 全绿（含 RESPONSE 透传 2 条新用例）\n- core：`tsc --noEmit` 0 错误；vitest 48/48（frame 10 + rpc 10 + natsmq 5 + entity 14 + group 6 + gatelink 6 + server 7）\n- e2e：`npm run e2e`（真 gate 二进制）→ 登录/callEntity 回包/rpcRequest 配对/group/global 全过\n- smoke.py 冒烟：通过 ✅（既有行为不回归）",
+          "artifacts": [
+            {
+              "kind": "change",
+              "path": "core/README.md"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "g_5e044dcfb252",
+      "title": "配置面：删 redis.mq_url、新增 nats 段",
+      "todos": [
+        {
+          "id": "t_abfb6dc51e0d",
+          "title": "改 config.go（Redis 删 MQURL、加 NATS{enabled,url} + Dump 注释键 + 默认值）",
+          "status": "done",
+          "origin": "agent",
+          "createdAt": "2026-11-26T06:04:32.697Z",
+          "updatedAt": "2026-11-26T06:05:46.058Z",
+          "artifacts": [
+            {
+              "kind": "change",
+              "path": "gate/internal/config/config_test.go"
+            },
+            {
+              "kind": "change",
+              "path": "gate/internal/config/config.go"
+            }
+          ]
+        },
+        {
+          "id": "t_9c8e01615ab0",
+          "title": "适配 config_test.go 往返用例",
+          "status": "done",
+          "origin": "agent",
+          "createdAt": "2026-11-26T06:04:32.697Z",
+          "updatedAt": "2026-11-26T06:05:45.121Z"
+        }
+      ]
+    },
+    {
+      "id": "g_2053b2c9c0c3",
+      "title": "Go 侧 natsmq 包",
+      "todos": [
+        {
+          "id": "t_a322b02ff32f",
+          "title": "写 internal/natsmq：Connect/Publish/Consume(channel)+Close，断线重连与日志",
+          "status": "done",
+          "origin": "agent",
+          "createdAt": "2026-11-26T06:04:32.697Z",
+          "updatedAt": "2026-11-26T06:09:51.273Z",
+          "artifacts": [
+            {
+              "kind": "change",
+              "path": "gate/internal/natsmq/natsmq_test.go"
+            },
+            {
+              "kind": "change",
+              "path": "gate/internal/natsmq/natsmq.go"
+            }
+          ]
+        },
+        {
+          "id": "t_d656537d9155",
+          "title": "natsmq 单测（离线，注入假 conn）",
+          "status": "done",
+          "origin": "agent",
+          "createdAt": "2026-11-26T06:04:32.697Z",
+          "updatedAt": "2026-11-26T06:09:50.767Z"
+        }
+      ]
+    },
+    {
+      "id": "g_8ae1ac6ca1c1",
+      "title": "hub 接线：绑定时订阅/退订",
+      "todos": [
+        {
+          "id": "t_b17ac3a46cbd",
+          "title": "hub 持有 mq，新增订阅生命周期（bind/evict/unbind）+ 泵 goroutine 进 OnLogic",
+          "status": "done",
+          "origin": "agent",
+          "createdAt": "2026-11-26T06:04:32.697Z",
+          "updatedAt": "2026-11-26T06:17:20.526Z",
+          "artifacts": [
+            {
+              "kind": "change",
+              "path": "gate/cmd/gate/main.go"
+            },
+            {
+              "kind": "change",
+              "path": "gate/internal/hub/hub_test.go"
+            },
+            {
+              "kind": "change",
+              "path": "gate/internal/hub/hub.go"
+            },
+            {
+              "kind": "change",
+              "path": "gate/internal/hub/logic.go"
+            },
+            {
+              "kind": "change",
+              "path": "gate/internal/hub/mq.go"
+            },
+            {
+              "kind": "change",
+              "path": "gate/internal/registry/consul.go"
+            },
+            {
+              "kind": "change",
+              "path": "gate/internal/session/table.go"
+            },
+            {
+              "kind": "change",
+              "path": "gate/README.md"
+            },
+            {
+              "kind": "change",
+              "path": "README.md"
+            }
+          ]
+        },
+        {
+          "id": "t_59fd00ee2fe5",
+          "title": "hub_test 补 NATS 旁路用例",
+          "status": "done",
+          "origin": "agent",
+          "createdAt": "2026-11-26T06:04:32.698Z",
+          "updatedAt": "2026-11-26T06:17:19.996Z"
+        }
+      ]
+    },
+    {
+      "id": "g_a010c0b830ba",
+      "title": "main.go 装配 + gate README",
+      "todos": [
+        {
+          "id": "t_4b2fc2939420",
+          "title": "main 建连（失败降级）+ 日志；README 配置表与结构图更新",
+          "status": "done",
+          "origin": "agent",
+          "createdAt": "2026-11-26T06:04:32.698Z",
+          "updatedAt": "2026-11-26T06:17:19.997Z"
+        }
+      ]
+    },
+    {
+      "id": "g_449ff0c6f897",
+      "title": "core TS 侧 natsmq",
+      "todos": [
+        {
+          "id": "t_da0bfea41017",
+          "title": "core/src/natsmq.ts：subject 约定 + publish/consume（async iterable），npm i nats",
+          "status": "done",
+          "origin": "agent",
+          "createdAt": "2026-11-26T06:04:32.698Z",
+          "updatedAt": "2026-11-26T06:20:07.910Z",
+          "artifacts": [
+            {
+              "kind": "change",
+              "path": "core/package-lock.json"
+            },
+            {
+              "kind": "change",
+              "path": "core/package.json"
+            },
+            {
+              "kind": "change",
+              "path": "core/src/natsmq.test.ts"
+            },
+            {
+              "kind": "change",
+              "path": "core/src/natsmq.ts"
+            }
+          ]
+        },
+        {
+          "id": "t_cf11f93c5f0b",
+          "title": "core 单测（离线，假连接）",
+          "status": "done",
+          "origin": "agent",
+          "createdAt": "2026-11-26T06:04:32.698Z",
+          "updatedAt": "2026-11-26T06:20:07.340Z"
+        }
+      ]
+    },
+    {
+      "id": "g_20308e1a5918",
+      "title": "文档与验证",
+      "todos": [
+        {
+          "id": "t_fd511b91054b",
+          "title": "README/protocol-map 链路清单补两层 IPC 约定",
+          "status": "done",
+          "origin": "agent",
+          "createdAt": "2026-11-26T06:04:32.698Z",
+          "updatedAt": "2026-11-26T06:20:46.207Z",
+          "artifacts": [
+            {
+              "kind": "change",
+              "path": "docs/protocol-map.md"
+            }
+          ]
+        },
+        {
+          "id": "t_8484e1068a18",
+          "title": "全量验证：go build/vet/test + smoke + core typecheck/test",
+          "status": "done",
+          "origin": "agent",
+          "createdAt": "2026-11-26T06:04:32.698Z",
+          "updatedAt": "2026-11-26T06:22:12.272Z",
+          "verification": "- gate `go build ./... && go vet ./... && go test -count=1 ./...`（含 `-race` hub/natsmq）→ 全部 ok\n- `go run ./cmd/gate -dump-config` → mq_url 不再出现，nats 段含注释键且可读回（config_test 往返）\n- core `npx tsc --noEmit && npm test` → 15/15 通过\n- `PYTHONIOENCODING=utf-8 python scripts/smoke.py` → 冒烟通过 ✅（NATS 关闭，TCP 主通道行为不变）"
+        }
+      ]
+    }
+  ],
+  "summary": "## Summary\n\ngate 性能优化 ①+② 落地（基准驱动，bench 文件已入仓库可复现对比）：\n\n- **② stats 原子化**：`Stats` 计数改 `atomic.Uint64`（内部 `statsCounters`），热路径上的每消息 2~3 次全局写锁全部去掉——`h.mu` 只守 clients/logics/mqSubs 表。16 并发实测吞吐 **914 → 292 ns/op（3.1×）**，多核不再串行。\n- **① 广播 marshal 一次**：`Peer` 接口加 `SendBytes(已 marshal 的 Envelope 字节)`（wsPeer/tcpPeer/fakePeer 同步实现）；组播/全服/单发统一走 `broadcastDown`/`deliverDown` 的 **marshal 一次 → 逐连接只做帧编码+写出**。组播×50：**26,770 → 8,400 ns/op，364 → 71 allocs（5.1×）**。\n\n## Changes\n\n- `hub.go`：`statsCounters`（atomic）+ `Stats()` 快照；`Peer` 加 `SendBytes`\n- `logic.go`：`broadcastDown`（组播/全服共用，Envelope 只 marshal 一次）；`deliverDown` 同路径；kick 的无效锁删除\n- `client.go` / `marshal.go`：计数点全部改 `atomic.Add`\n- `clientgate/ws.go`、`logiclink/tcp.go`：`Send` 重构为 `marshal + SendBytes`\n- 计数语义统一：`ForwardedDown` 按连接计（原组播 per-conn、全服 per-广播，统一为扇出工作量的真实语义）\n- 无协议/行为变化；e2e 与 smoke 全过\n\n## Testing\n\n- `go build / vet / test -race` 全绿\n- bench `-count=3` 稳定：并行上行 292 ns/op；组播×50 8.4µs/71 allocs\n- e2e（重建 gate 二进制）五项全过 ✅；smoke.py 冒烟 ✅\n- 注：串行单发 bench 数字略有上升（886→980/674→845 ns）——fakePeer 现在如实计入此前被隐藏的 Envelope marshal（真实路径这笔开销一直存在且在广播路径已被消掉大半）"
+}
