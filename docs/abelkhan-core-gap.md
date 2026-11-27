@@ -56,7 +56,7 @@ abelkhan 整齐**，这五项不用补，补了是倒退。
 | 12 | **顶号** | 复用/新建 → Redis Lua `session:{user}` 占位 → 同 hub 踢 / 跨 hub `HubSessionReplaced` → 旧实体 Save + 摘除 | 同节点：`rebind` 复用旧对象；跨节点：`hub.claimUser` 占位 + `HubSessionReplaced` 让旧节点退役；gate 把挤出的会话投对节点并带错误码 4 | ✅（状态不搬运） |
 | 13 | 断线重连 | 客户端 SDK 完整（退避重连 + 重同步 + 未认领删除）；服务端只换 `Client`，不重发实体 | `GateForwardClientRequestReconnect` 已转发，逻辑层**计数后丢弃** | ❌ |
 | 14 | **迁移** | 六阶段：切割(fence)→落地(Save)→重建(Load+replay)→转尾→墓碑静默→gate re-point；失败回滚 | 协议里明确删掉 `TransferPrepare/Commit`（改为"落库→按 key 重新加载"），代码 0 行 | ❌ |
-| 15 | 持久化 | `MongoProxy` + `Player.Save()`（但恒成功、从未被调用） | 定稿 PostgreSQL，**没有存储模块** | ❌ |
+| 15 | 持久化 | `MongoProxy` + `Player.Save()`（但恒成功、从未被调用） | `core/src/storage/`：`Document<T>` + PG jsonb + 版本 CAS + Redis 缓存 + 两个写盘间隔；**未接生命周期** | 🟡 |
 | 16 | 服务发现 | gate/hub 都注册；hub watch consul 自动连 gate；**下线不处理** | gate 注册 + TTL 心跳 + 状态 note + 优雅注销；逻辑层**手填 host:port**，不发现 | 🟡 |
 | 17 | 全局实体 | `GlobalEntity`（可存盘的全局单例） | 只有 `global.rpcNotify` 广播助手，无全局实体概念 | 🟡 |
 | 18 | 定时器 | `TimerService`：tick / 日 / 周 / 月 / 循环日 / 循环周，主循环 16ms Poll | 无（业务只能 `setTimeout`） | ❌ |
@@ -168,10 +168,12 @@ abelkhan：`core/MongoProxy.cs`（update/save/remove/ping/index/guid）+ `Player
 能力形状是对的（实体 `FullInfo()` / `ClientInfo()` 双视图），但实现是坏的：`Update/Save/Remove`
 恒返回 true，`Save()` 是 `async void` 且**从未被任何代码调用**，无脏标记/批量/重试/版本。
 
-meter：定稿 PostgreSQL + "存储访问下沉为 hub 内的一个模块，不是跨进程协议"，
-协议里连存储原语都还没定（`ErrorCode.STORAGE_CONFLICT` 是为乐观锁预留的）。
-要补的最小面：`Storage` 接口（load/save/delete，带 `expect_version`）+ 一个 PG 实现 +
-存盘生命周期（登录加载 / 定时 / 下线 / 被顶号 / 迁移前）。**没有它，顶号和迁移都只是"删对象"。**
+meter：定稿 PostgreSQL + "存储访问下沉为 hub 内的一个模块，不是跨进程协议"。**模块已实现**
+（`core/src/storage/`）：`Document<T>`（整个 `T` 走 JSON）、PG `jsonb` 一张通用文档表、版本 CAS
+（`STORAGE_CONFLICT` = 12）、Redis 缓存（`SET ... PX`，TTL 淘汰）、事件路径双写、周期写盘的两个间隔
+（缓存比库写得勤）。形状取自 go-zero 的 `sqlc` + `cache`，但缓存是**文档粒度**（一个键），
+所以没有它那套"索引键 5s 安全间隙"。**还差的是接线**：登录加载 / 周期存盘 / 下线落库 / 迁移前存盘
+——见 [`../core/SPEC.md`](../core/SPEC.md)「存储」的"还没接"。
 
 ---
 

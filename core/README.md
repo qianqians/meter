@@ -14,7 +14,7 @@
 cd schema && ./check.sh    # 先出 codegen（生成到 core/src/gen/，已 gitignore）
 cd ../core
 npm install                # 首次
-npm test                   # vitest：73 条
+npm test                   # vitest：93 条（+4 条需真 PG/Redis 的集成用例，默认跳过）
 npm run typecheck          # tsc --noEmit
 npm run e2e                # 全链路：先 cd ../gate && go build -o ../core/scripts/gate-e2e.exe ./cmd/gate
 ```
@@ -53,6 +53,43 @@ rpc.register('entity.attack', AttackRequestSchema, AttackResultSchema,
 - Actor：同一实体的调用严格串行（第一个在等外部事件时第二个不开始）、job 抛错不影响后续、
   并发恰好一次、`fence()` 只覆盖调用那一刻已入队的调用、`close()` 丢弃排队中的并把等待方 reject
 - 实体销毁：排队中的调用被丢弃（不回包），之后到达的调用计入 `stats.closed`
+
+## 存储（`src/storage/`）
+
+形状取自 go-zero 的 `sqlc.CachedConn` + `cache.cacheNode`，按本项目改成**文档粒度 + 写穿 + TTL 淘汰**：
+
+```ts
+import { createPgExecutor, createRedisCache, createDocumentStore, startAutoFlush } from './storage';
+
+const pg = createPgExecutor({ connectionString: process.env.PG_URL, migrate: true });
+await pg.migrate();                                   // 建 documents 表（生产走迁移流程）
+const redis = await createRedisCache({ url: process.env.REDIS_URL! });
+
+const players = createDocumentStore<PlayerDoc>({
+  kind: 'player',
+  sql: pg.sql,
+  cache: redis.cache,
+  // 默认：缓存 15 分钟、缓存每 30s 写一次、库每 2 分钟写一次
+});
+
+const doc = await players.load(entityId);             // Redis → PG → 回填
+const saved = await players.save({                    // 事件路径：两边全量写，先库后缓存
+  kind: 'player', id: entityId, value: newDoc,
+  version: doc?.version ?? 0, dirty: true, savedAt: 0,
+});                                                   // 版本冲突抛 StorageConflictError（码 12）
+
+players.track({ ...saved, value: newDoc, dirty: true }); // 周期写盘只看登记过的
+startAutoFlush([players]);                            // 按配置的两个间隔落盘
+```
+
+- 缓存里的 JSON 带版本（`{v,d}`）——命中时也要能拿到 CAS 期望值。
+- `cache.failFast`（默认开）：Redis 读失败**不回源 PG**，避免缓存故障变成 DB 洪峰。
+- 缓存写失败不会让 `save` 失败：PG 已是新值，再 `DEL` 掉旧缓存让下次读回源。
+- 真库集成测试（两个环境变量都给才跑）：
+
+```bash
+PG_URL=postgres://postgres:postgres@127.0.0.1:5432/postgres REDIS_URL=redis://127.0.0.1:6379/0 npm test -- src/storage/integration
+```
 
 ## 还没做的
 

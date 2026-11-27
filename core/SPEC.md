@@ -21,6 +21,9 @@ tags: [typescript, logic-layer]
 - **可以依赖**：`schema` 生成的 TS 消息、一个 `Transport` 接口、`node:*`。
 - **可选注入**：一个 `NodeBus`（节点→节点的通知，目前只有顶号）。和 `Transport` 一样是为了能离线单测
   ——本模块**不直接连 Redis / NATS**：会话目录在 gate 侧，节点只通过 `hub.claimUser` 问它。
+- **唯一的例外是 `src/storage/` 子模块**：它 import `pg` 与 `redis`（两个驱动），但对外只暴露
+  `SqlExecutor` / `CacheClient` 两个极小接口——其余代码（`server.ts` / `entity.ts`）**不 import 驱动**，
+  单测全走假实现。
 - **禁止依赖**：引擎（`import 'cc'`）、socket 细节、渲染态。字节只能经 `Transport` 进出，所以同一份逻辑
   能在 Node 里被单测、被 e2e、被压测驱动。
 - **不许变成第二套规则**：以后才有的 Cython `kernel` 只做被 profile 证明的热点；规则出现在那里，
@@ -87,8 +90,32 @@ tags: [typescript, logic-layer]
 **登录与心跳不经过本模块**：`client.login` 由 gate 在 `hub.createPlayerEntity` 时回 `LoginResult`，
 `HeartBeat` 与空帧 ping 由 gate 直接答。逻辑层只在 `gate.clientUplink` 里看到 logout 与 ack。
 
+## 存储（`src/storage/`）
+
+形状取自 go-zero 的 `sqlc.CachedConn` + `cache.cacheNode`，按本项目改了三点（理由在 `storage/types.ts` 头部）：
+
+- **文档粒度**：一条记录 = 一个 `Document<T>`（`JSON.stringify` 整个 `T`），PG 一张通用表
+  `documents(kind, doc_id, version, body jsonb, updated_at)`。一个文档一个缓存键——
+  go-zero 那套"主键键 + 每个唯一索引键 + 5s 安全间隙"在这里不存在。
+- **写穿**：事件路径（迁移 / 顶号 / 下线）调 `save()`，**先 PG（版本 CAS）再 Redis（`SET ... PX`）**；
+  库写失败直接抛（缓存里不会出现库上没有的版本），库成功而缓存失败只记日志并 `DEL` 掉旧值，
+  不把"缓存失败"升级成"存档失败"。
+- **淘汰靠 TTL**：`cache.ttlMs`；离线回收由生命周期调 `delete()`（先删缓存再删库）。周期写盘由两个
+  间隔控制（`flush.cacheIntervalMs` / `flush.pgIntervalMs`，缓存比库写得勤），只写 `track()` 登记过的文档。
+
+读路径 **Redis → PG → 回填**；缓存里的 JSON 带版本（`{v,d}`），否则命中时拿不到 CAS 期望值。
+`cache.failFast`（默认开）时缓存读失败**不回源**——一次 Redis 故障不能变成一次 DB 流量洪峰。
+版本冲突抛 `StorageConflictError`（错误码 12，与 `common.proto` 的 `STORAGE_CONFLICT` 一致）。
+
+**已知取舍**：缓存间隔 < 库间隔时，**缓存里的版本可能比库新**（周期写盘先写缓存、后写库）。进程崩溃
+会退回到上一次落库的值——这是"缓存写得更勤"换来的，写库间隔就是可接受的回退窗口。
+
+**还没接**：登录加载 / 周期存盘 / 下线落库 / 顶号与迁移前存盘——模块与适配器都在，接线是下一项。
+`documents` 表的迁移还没工具化（`SCHEMA_SQL` + `-migrate` 先手动跑）。
+**客户端共享代码不要 import `storage/`**（它带 `pg` / `redis` 两个 Node 驱动）；它在 hub 侧使用。
+
 ## 还没接
 
-持久化（PostgreSQL 存储模块，定稿但一行代码都没有，所以顶号只能做到“复用在同节点、跨节点重建”）、
 断线重连（`gate.clientReconnect`）、跨服实体调用（NATS `entity_{id}_logic_mq`，缺实体所有权表）、
-方法级内容鉴权（框架只转发，鉴权是每个可被客户端调用的方法自己的责任）。
+方法级内容鉴权（框架只转发，鉴权是每个可被客户端调用的方法自己的责任）、
+以及上面「存储」一节末尾列的接线。
