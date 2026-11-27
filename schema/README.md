@@ -3,7 +3,7 @@
 本目录是本仓库**第一批真正的工程产物**：`schema/pb/*.proto` 是服务端框架面的协议定义，
 `.proto` **只描述消息**——方法名不在 schema 里，类型绑定在业务侧的 `RpcMap`（见 §4）。
 
-**状态：框架协议 v1 定稿（2026-11-23 收敛后）**。**7 个 proto / 43 条消息**、`./check.sh` **11 条断言全绿**；业务消息按需求暂不生成。
+**状态：框架协议 v1 定稿（2026-11-23 收敛后）**。**7 个 proto / 47 条消息**、`./check.sh` **11 条断言全绿**；业务消息按需求暂不生成。
 
 范围纪律（按需求："先生成底层框架上的协议，功能相关的先不生成"）：
 
@@ -53,7 +53,7 @@ message Msg { oneof payload { Request req = 1; Response rsp = 2; Notify notify =
 |---|---|---|
 | 1 | **可靠投递 + ack**：`HubNotifyClientMq{seq}` + 客户端回 `AckReliabilityMsg{seq}`，gate 按 seq 校验"这条 ack 对应的是不是队列头" | **仍缺**。协议里只有 `AckReliable` 这一条客户端消息，`gate_logic.proto` 没有 `HubNotifyClientMq`、没有 seq、没有重投。差异见 [`../docs/abelkhan-core-gap.md`](../docs/abelkhan-core-gap.md) §2.4 |
 | 2 | **实体生命周期控制面**：`CreatePlayerEntity` / `CreateRemoteEntity` / `DeleteRemoteEntity` / `RefreshEntity` | **已补**。`gate_logic.proto` 有 `HubCreatePlayerEntity` / `HubCreateRemoteEntity` / `HubDeleteRemoteEntity` / `HubRefreshEntity`，`gate/internal/hub/logic.go` 全部落地 |
-| 3 | **`TakeOverUser`（抢人）** | **不做成独立消息**。顶号/迁移统一由客户端重新请求 `GateForwardClientRequestService` 承载；要补的是会话目录、旧实体退役钩子与登录回包，不是一条 `TakeOverUser`。时序见 [`../docs/abelkhan-core-gap.md`](../docs/abelkhan-core-gap.md) §3 |
+| 3 | **`TakeOverUser`（抢人）** | **已做，但不是一条 `TakeOverUser`**：登录由客户端重新请求 `GateForwardClientRequestService` 承载，框架用 `hub.claimUser` / `gate.ownerInfo`（目录占位）与 `hub.sessionReplaced`（节点间退役通知）两对消息完成。见 [`../core/SPEC.md`](../core/SPEC.md)「会话与顶号」 |
 
 ### 1.4 我们比它强的地方（不改）
 

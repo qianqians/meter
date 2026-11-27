@@ -37,18 +37,26 @@ export const ERR = {
   OK: 0,
   UNKNOWN: 1,
   TIMEOUT: 2,
+  /** 同账号重复登录：gate 用它踢旧连接，逻辑层用它把这条断开认成“被顶号”。 */
+  DUPLICATE_LOGIN: 4,
   NOT_FOUND: 7,
   BAD_FRAME: 10,
 } as const;
 
-/** 实体回调收到的上下文：谁在调（连接）。 */
+/** 实体回调收到的上下文：谁在调（哪台 gate 的哪条连接）。 */
 export interface CallContext {
   connId: string;
+  gateName?: string;
 }
 
-/** 下行通道：实体只管装配 Envelope，怎么发（TCP / 测试假连接）由 Server 注入。 */
+/**
+ * 下行通道：实体只管装配 Envelope，"发到哪台 gate、怎么发"由 Server 注入。
+ *
+ * 必须带 `gateName`：逻辑节点可以同时连着多台 gate，实体只记住自己那条连接在哪台——
+ * 这就是跨 gate 顶号时能把踢人消息发回旧连接那台 gate 的全部依据。
+ */
 export interface Downlink {
-  send(envelope: Uint8Array): void;
+  send(gateName: string | undefined, envelope: Uint8Array): void;
 }
 
 interface Pending {
@@ -63,6 +71,8 @@ type Handler = (req: Uint8Array, ctx: CallContext) => Uint8Array | Promise<Uint8
 export interface EntityStats {
   unknownMethod: number;
   timeout: number;
+  /** 顶号重绑次数（同一实体换过几次连接）。 */
+  rebinds: number;
   /** 到达时实体已销毁的调用（在入队前就挡掉）。正常为 0，>0 说明路由比销毁晚了一步。 */
   closed: number;
 }
@@ -105,10 +115,18 @@ export function forwardCallClient(
 
 export interface EntityOptions {
   connId?: string;
+  /** 这条连接所属的 gate（玩家实体必填；怪/NPC 没有）。 */
+  gateName?: string;
   userId?: string;
   /** 队列自身的意外异常（业务 handler 的异常已由 dispatch 转成 UNKNOWN 回包）。默认静默。 */
   onQueueError?: (err: unknown) => void;
 }
+
+/**
+ * 实体为什么消失。业务据此区分"掉线"与"被顶号"：前者要做离线处理，后者通常要结算并提示
+ * "你已在别处登录"。语义与 gate 的 `ClientDisconnect.error` 一致（4 = 重复登录）。
+ */
+export type DestroyReason = 'disconnect' | 'replaced';
 
 /**
  * Entity：一个逻辑实体。玩家实体的 connId 非空；怪/NPC 为空（只能收调用、不能主动发）。
@@ -116,20 +134,22 @@ export interface EntityOptions {
 export class Entity {
   readonly id: string;
   readonly type: string;
-  /** 玩家的连接；怪/NPC 为 undefined。 */
-  readonly connId: string | undefined;
+  /** 玩家的连接；怪/NPC 为 undefined。顶号时会换（见 `rebind`），所以不是 readonly。 */
+  private _connId: string | undefined;
+  /** 这条连接在哪台 gate 上（顶号换 gate 时会变，所以不是 readonly）。 */
+  private _gateName: string | undefined;
   /** 服务端视角的玩家 id（登录时由业务给出）。 */
   readonly userId: string | undefined;
 
   /** 实体销毁时 Server 调用；业务可以挂清理逻辑（离开场景、存档等）。 */
-  onDestroy?: () => void;
+  onDestroy?: (reason: DestroyReason) => void;
 
   private readonly down: Downlink;
   private readonly actor: Actor;
   private readonly handlers = new Map<string, Handler>();
   private readonly pending = new Map<number, Pending>();
   private nextCallbackId = 1;
-  readonly stats: EntityStats = { unknownMethod: 0, timeout: 0, closed: 0 };
+  readonly stats: EntityStats = { unknownMethod: 0, timeout: 0, closed: 0, rebinds: 0 };
 
   constructor(
     id: string,
@@ -140,7 +160,8 @@ export class Entity {
     this.id = id;
     this.type = type;
     this.down = down;
-    this.connId = opts.connId;
+    this._connId = opts.connId;
+    this._gateName = opts.gateName;
     this.userId = opts.userId;
     this.actor = new Actor({ onError: opts.onQueueError });
   }
@@ -155,9 +176,37 @@ export class Entity {
     return this.actor.closed;
   }
 
+  get connId(): string | undefined {
+    return this._connId;
+  }
+
+  get gateName(): string | undefined {
+    return this._gateName;
+  }
+
   /** 是否玩家实体（有连接、能主动调客户端）。 */
   get isPlayer(): boolean {
-    return this.connId !== undefined;
+    return this._connId !== undefined;
+  }
+
+  /**
+   * 顶号：把实体重新绑到一条新连接上（**同一个对象**，内存状态不丢）。
+   *
+   * 旧连接上的在途 `rpcRequest` 一律 reject——它们的回包只会到新连接上，配对号对不上，
+   * 留着就是一个永远不 resolve 的 Promise。分派表与队列**不动**：实体还活着。
+   */
+  rebind(connId: string, gateName?: string): void {
+    if (this._connId === undefined) {
+      throw new RpcError(`实体 ${this.id}（${this.type}）没有连接，不能重绑`, ERR.NOT_FOUND);
+    }
+    this._connId = connId;
+    this._gateName = gateName ?? this._gateName;
+    this.stats.rebinds++;
+    for (const p of this.pending.values()) {
+      if (p.timer) clearTimeout(p.timer);
+      p.reject(new RpcError(`会话已切换: ${p.method}`, ERR.NOT_FOUND));
+    }
+    this.pending.clear();
   }
 
   // ---------------- 客户端 → 实体（register） ----------------
@@ -274,7 +323,7 @@ export class Entity {
     if (this.connId === undefined) {
       throw new RpcError(`实体 ${this.id}（${this.type}）不是玩家，没有可推送的客户端`, ERR.NOT_FOUND);
     }
-    this.down.send(forwardCallClient(MsgType.MSG_NOTIFY, this.connId, this.id, method, 0, ntf));
+    this.down.send(this._gateName, forwardCallClient(MsgType.MSG_NOTIFY, this.connId, this.id, method, 0, ntf));
   }
 
   // ---------------- 实体视图同步（组视图的原语） ----------------
@@ -282,7 +331,7 @@ export class Entity {
   /** 把自己的视图建到某个客户端（组内新成员要看见我）。 */
   createRemoteTo(player: Entity, content: Uint8Array): void {
     if (player.connId === undefined) return;
-    this.down.send(envelopeBytes(MsgType.MSG_NOTIFY, 'hub.createRemoteEntity', 0, 0,
+    this.down.send(player.gateName, envelopeBytes(MsgType.MSG_NOTIFY, 'hub.createRemoteEntity', 0, 0,
       toBinary(HubCreateRemoteEntitySchema, create(HubCreateRemoteEntitySchema, {
         connId: player.connId,
         entityId: this.id,
@@ -294,7 +343,7 @@ export class Entity {
   /** 从某个客户端的视图里删掉自己（组内成员离开）。 */
   deleteRemoteFrom(player: Entity): void {
     if (player.connId === undefined) return;
-    this.down.send(envelopeBytes(MsgType.MSG_NOTIFY, 'hub.deleteRemoteEntity', 0, 0,
+    this.down.send(player.gateName, envelopeBytes(MsgType.MSG_NOTIFY, 'hub.deleteRemoteEntity', 0, 0,
       toBinary(HubDeleteRemoteEntitySchema, create(HubDeleteRemoteEntitySchema, {
         connId: player.connId,
         entityId: this.id,
@@ -304,7 +353,7 @@ export class Entity {
   /** 给某个客户端刷新自己的视图（属性变化，全量内容）。 */
   refreshTo(player: Entity, content: Uint8Array): void {
     if (player.connId === undefined) return;
-    this.down.send(envelopeBytes(MsgType.MSG_NOTIFY, 'hub.refreshEntity', 0, 0,
+    this.down.send(player.gateName, envelopeBytes(MsgType.MSG_NOTIFY, 'hub.refreshEntity', 0, 0,
       toBinary(HubRefreshEntitySchema, create(HubRefreshEntitySchema, {
         connId: player.connId,
         entityId: this.id,
@@ -326,7 +375,7 @@ export class Entity {
             }, timeout)
           : undefined;
       this.pending.set(id, { resolve, reject, timer, method });
-      this.down.send(forwardCallClient(MsgType.MSG_REQUEST, this.connId!, this.id, method, id, body));
+      this.down.send(this._gateName, forwardCallClient(MsgType.MSG_REQUEST, this.connId!, this.id, method, id, body));
     });
   }
 
@@ -349,8 +398,11 @@ export class Entity {
     }
   }
 
-  /** 实体销毁：关队列（丢弃排队中的调用、reject 它们）→ reject 在途 rpcRequest → 跑清理钩子。 */
-  destroy(): void {
+  /**
+   * 实体销毁：关队列（丢弃排队中的调用、reject 它们）→ reject 在途 rpcRequest → 跑清理钩子。
+   * `reason` 原样交给 `onDestroy`，业务据此区分掉线与被顶号。
+   */
+  destroy(reason: DestroyReason = 'disconnect'): void {
     this.actor.close();
     for (const p of this.pending.values()) {
       if (p.timer) clearTimeout(p.timer);
@@ -358,15 +410,15 @@ export class Entity {
     }
     this.pending.clear();
     this.handlers.clear();
-    this.onDestroy?.();
+    this.onDestroy?.(reason);
   }
 
   private replyOk(connId: string, method: string, callbackId: number, rspBytes: Uint8Array): void {
-    this.down.send(forwardCallClient(MsgType.MSG_RESPONSE, connId, this.id, method, callbackId, rspBytes));
+    this.down.send(this._gateName, forwardCallClient(MsgType.MSG_RESPONSE, connId, this.id, method, callbackId, rspBytes));
   }
 
   private replyError(connId: string, method: string, callbackId: number, code: number, detail: string): void {
     const err = toBinary(ErrorCodeSchema, create(ErrorCodeSchema, { code, detail }));
-    this.down.send(forwardCallClient(MsgType.MSG_RESPONSE, connId, this.id, method, callbackId, err));
+    this.down.send(this._gateName, forwardCallClient(MsgType.MSG_RESPONSE, connId, this.id, method, callbackId, err));
   }
 }

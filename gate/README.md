@@ -1,6 +1,7 @@
 # gate —— 接入层（Go）
 
-**两个监听端口**：对外 WebSocket（客户端），对内 TCP（逻辑节点连入）。P0 骨架：能起来、能切帧、能建会话、能双向转发。
+**两个监听端口**：对外 WebSocket（客户端），对内 TCP（逻辑节点连入）。P0 骨架：能起来、能切帧、能握手
+（`NotifyConnID`）、能建会话与回登录结果、能双向转发、能答心跳。
 
 ```
 客户端 ──WebSocket(:9001/ws)──►  gate  ──TCP(:9002)──►  逻辑层
@@ -70,7 +71,7 @@ gate -dump-config > config.json
 | `consul` | `enabled` / `url` | 关闭时下面几项忽略 |
 | | `ttl_s` / `report_interval_s` | **必须满足 report < ttl**，否则启动就报错；`report_interval_s` 就是"每多少秒上报一次" |
 | | `tags` | 注册时带的 tags |
-| `redis` | `cache_url` | **缓存**（消息队列已改用 nats 段） |
+| `redis` | `enabled` / `cache_url` / `session_ttl_s` | **跨 gate 会话目录**（`session:{userId}`）。`enabled=false` 时只跑单 gate；跨 gate 顶号必须打开 |
 | | `pool_size` / `dial_timeout_ms` | 连接池与建连超时 |
 | `nats` | `enabled` / `url` | **消息队列层**（旁路）：核心 NATS；server↔server `entity_{id}_logic_mq`，server→gate `entity_{id}_gate_mq`；连不上仅记日志，TCP 主通道不受影响 |
 | `log` | `dir` / `file_name` | `file_name` 支持 `%Y%m%d%H`；空则只打 stderr |
@@ -195,7 +196,13 @@ internal TCP 端口然后连上来（见"两个端口为什么这样分工"）�
 | 客户端 → 逻辑（业务调用响应） | `Envelope{RESPONSE, body=ClientUplink{call}}` | `ClientResponseHub{entity_id, error, content, method}` |
 | 客户端 → 逻辑（登录） | `ClientUplink{login}` | `GateForwardClientRequestService{service_name="auth", gate_name, conn_id, content}` |
 | 客户端 → 逻辑（重连） | `ClientUplink{reconnect}` | `GateForwardClientRequestReconnect{gate_name, conn_id, user_id, content}` |
-| 客户端 → 逻辑（其余框架消息） | `ClientUplink{logout/heartbeat/ack}` | 原样透传 |
+| 客户端 → 逻辑（其余框架消息） | `ClientUplink{logout/ack}` | 原样透传 |
+| 逻辑 → gate（会话归属） | `hub.claimUser{user_id, entity_id, conn_id}` | 目录 Lua 占位 → `Envelope{RESPONSE, gate.ownerInfo}`（旧主人 + 新 seq）；未启用目录时回空 |
+| 客户端 → gate（心跳） | `ClientUplink{heartbeat}` | `Envelope{RESPONSE, body=ClientDownlink{heartbeat}}`（**由 gate 直接答**，不进逻辑链路） |
+| 客户端 → gate（保活帧） | `Envelope` 载荷长度 0 | 回一个空帧（最省的 ping/pong） |
+| gate → 逻辑（握手回包） | 收到 `logic.hello` | `Envelope{method="logic.hello.ack", body=GateHello{gate_name, proto_ver}}` |
+| gate → 客户端（握手） | 连接登记 | `Envelope{method="", body=ClientDownlink{conn_id}}` — 连上第一条 |
+| gate → 客户端（登录结果） | 逻辑层 `HubCreatePlayerEntity` / `HubKickOffClient` | 成功：`Envelope{RESPONSE, 原 callback_id, status=0, body=ClientDownlink{login}}`；失败：`status=错误码`、body 为空，随后 `kick_off` |
 | 客户端断开 | 连接关闭 / 超时 | `ClientDisconnect{conn_id, user_id, entity_id}` — **逻辑层据此做离线处理** |
 | 逻辑 → 客户端（调用） | `GateForwardHubCallClient/Group/Global` | `Envelope{method=业务方法名, body=ClientDownlink{call/global}}` |
 | 逻辑 → 客户端（视图） | `HubCreatePlayerEntity/…/RefreshEntity` | `Envelope{method="", body=ClientDownlink{create_player/…}}` |
@@ -204,6 +211,11 @@ internal TCP 端口然后连上来（见"两个端口为什么这样分工"）�
 
 **逻辑层寻址**：`sendToLogic` 按**会话的 NodeID** 选节点（实体在哪就发哪）；未登录时任选一个。
 
+**登录回包是 gate 的事**：`client.login` 的裁决在逻辑层（`onLogin`），但结果要等
+`HubCreatePlayerEntity`（成功）或 `HubKickOffClient`（失败）才到，而这两条消息里没有客户端的
+`callback_id` —— 所以 gate 用 `loginPending` 记住它，裁决到了再回。`resume_token` 归根到底要由 gate
+无状态校验（旧会话已不在内存里），当前留空，与重连一起做。
+
 **gate 不解 `content`**：它只读 `entity_id` / `conn_id` 用于寻址，`content` 原样搬。唯一的翻译是"内部消息 → 客户端消息"这一层包装。
 
 ## 已验证（`go test ./...` + 冒烟）
@@ -211,11 +223,15 @@ internal TCP 端口然后连上来（见"两个端口为什么这样分工"）�
 - `frame`：往返、半包、未知 flags 位、`ts` 跨 32 位回绕、异常时钟 clamp、**与 TS 侧逐字节一致的黄金向量**
 - `session`：绑定/解绑、同实体被新连接接管时返回旧会话、改绑、组播按连接去重
 - `hub`：上行转发字段正确、未登录丢弃并计数、`CallClient` 投递（业务方法名透传）、组播去重、广播、建实体时踢掉旧连接、坏信封计数
-- 冒烟：**真实 TCP + 真实 WebSocket**，六步全过
+- `hub`（握手/登录/心跳）：`NotifyConnID` 字段齐全、登录成功在 `createPlayerEntity` 后回 `LoginResult`（原
+  callback_id）、登录失败先回 `status` 再 `kick_off`、心跳由 gate 作答且不进逻辑链路、空帧回空帧
+- 冒烟：**真实 TCP + 真实 WebSocket**，七步全过（含从 `NotifyConnID` 取 `conn_id`，可重复跑）
 
 ## 还没做
 
 1. ~~按 `entity → node` 选逻辑节点~~ ✅ 已按会话 NodeID 选
+2. ~~跨 gate 顶号~~ ✅ 已做：会话目录（Redis）+ `hub.claimUser` 占位 + 逻辑节点之间的 NATS 总线
+   通知旧节点退役。**状态不跟着搬**（存储模块还没写），跨节点是"退役 + 重建"
 2. 压缩（帧头 `flags` 的 zstd 位留好了，两端都没接）
 3. 限流与背压、写缓冲上限
 4. TLS（WSS 需要证书；现在只有明文 WS）

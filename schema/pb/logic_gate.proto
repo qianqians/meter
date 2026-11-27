@@ -77,6 +77,17 @@ message GateForwardClientRequestReconnect {
   bytes  content = 4;      // 客户端 `Reconnect.content` 的原样字节
 }
 
+// 会话目录占位：逻辑层在**认证之后**问 gate「这个用户现在归谁」，同时把自己写成新主人。
+//
+// 为什么要问 gate：旧会话可能在另一台 gate 上，只有跨 gate 共享的目录知道它的下落；
+// 而认证只能由逻辑层做（token 是业务语义），所以这个查询发生在认证之后。
+// gate 用一条 Lua 做「读旧值 + seq+1 + 写新值」，跨节点并发登录只有一个赢家拿到旧记录。
+message HubClaimUser {
+  string user_id = 1;
+  string entity_id = 2;   // 新会话将要使用的实体 id（复用旧对象时就是旧 id）
+  string conn_id = 3;     // 新连接
+}
+
 // 服务级请求：目标不是一个实体，而是一个"服务"（排行榜、跨服匹配、商城结算……）。
 // 这类请求没有 entity_id，靠 `service_name` 分发。
 message GateForwardClientRequestService {

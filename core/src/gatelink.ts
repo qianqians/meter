@@ -15,8 +15,14 @@ import net from 'node:net';
 import { create, toBinary, fromBinary } from '@bufbuild/protobuf';
 
 import { EnvelopeSchema, MsgType } from './gen/envelope_pb';
+import { GateHelloSchema } from './gen/gate_logic_pb';
 import { decodeFrames, encodeFrame, type Frame } from './frame';
 import type { Transport } from './rpc';
+
+/** 握手方法名（与 gate 的 `internal/logiclink` 约定一致）。 */
+export const HELLO_METHOD = 'logic.hello';
+/** gate 的握手回包：用来告诉逻辑节点"这条链路是哪台 gate"。 */
+export const HELLO_ACK_METHOD = 'logic.hello.ack';
 
 export interface GateLinkOptions {
   host: string;
@@ -26,6 +32,16 @@ export interface GateLinkOptions {
   /** 单调毫秒，帧头 ts 用（测试注入假时钟）。 */
   now?: () => number;
   onClose?: (err: Error | undefined) => void;
+  /** 等 gate 回 hello.ack 的超时；默认 5s。 */
+  handshakeTimeoutMs?: number;
+}
+
+/**
+ * 一条已握手的 gate 链路：逻辑层用它做下行寻址（`name` 来自 gate 的握手回包）。
+ */
+export interface GateHandshake {
+  name: string;
+  transport: Transport;
 }
 
 /**
@@ -57,39 +73,92 @@ export function createLinkTransport(
   return link;
 }
 
-/** 连 gate：握手（发 logic.hello + 收到首帧）后 resolve 出 Transport。 */
-export function connectGate(opts: GateLinkOptions): Promise<Transport> {
+/**
+ * 连 gate 并完成握手：发 `logic.hello`（body = node_id），等 gate 回 `logic.hello.ack`
+ * （body = `GateHello{gate_name, proto_ver}`），**拿到 gate 名字之后**才 resolve。
+ *
+ * 为什么必须等回包：逻辑节点可以连多台 gate，而它必须知道每条链路对面是哪台——
+ * 实体记住自己在哪台 gate 上（跨 gate 顶号时靠它把踢人消息发回旧连接那台）。
+ * 握手期间到达的业务帧先缓冲，等调用方 `onData` 注册后按序喂进去。
+ */
+export function connectGate(opts: GateLinkOptions): Promise<GateHandshake> {
   return new Promise((resolve, reject) => {
     const now = opts.now ?? (() => Date.now());
+    const timeoutMs = opts.handshakeTimeoutMs ?? 5000;
     let settled = false;
     let closed = false;
+    let sink: ((bytes: Uint8Array) => void) | undefined;
+    const buffered: Uint8Array[] = [];
 
     const socket = net.createConnection({ host: opts.host, port: opts.port }, () => {
-      // 握手：首帧 logic.hello，body = node_id 的 utf8 字节。写出即就绪（见文件头注释）
       const hello = toBinary(EnvelopeSchema, create(EnvelopeSchema, {
         msgType: MsgType.MSG_NOTIFY,
-        method: 'logic.hello',
+        method: HELLO_METHOD,
         body: new TextEncoder().encode(opts.nodeId),
       }));
       socket.write(encodeFrame({ flags: 0, ts: now() & 0xffffffff, payload: hello }));
-      settled = true;
-      resolve(transport);
     });
 
-    const transport = createLinkTransport(socket, { now });
-
+    const link = createLinkTransport(socket, { now });
     socket.on('data', (chunk: Buffer) => {
-      transport.feed(chunk);
+      link.feed(chunk);
     });
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      reject(new Error(`连 gate ${opts.host}:${opts.port} 等 hello.ack 超时（${timeoutMs}ms）`));
+    }, timeoutMs);
+    timer.unref?.();
+
+    const transport: Transport = {
+      send: (bytes) => link.send(bytes),
+      onData: (cb) => {
+        sink = cb;
+        for (const b of buffered.splice(0)) cb(b);
+      },
+    };
+
+    link.onData((bytes) => {
+      if (!settled) {
+        try {
+          const env = fromBinary(EnvelopeSchema, bytes);
+          if (env.method === HELLO_ACK_METHOD) {
+            const hello = fromBinary(GateHelloSchema, env.body);
+            if (!hello.gateName) {
+              settled = true;
+              clearTimeout(timer);
+              socket.destroy();
+              reject(new Error('gate 的 hello.ack 里没有 gate_name'));
+              return;
+            }
+            settled = true;
+            clearTimeout(timer);
+            resolve({ name: hello.gateName, transport });
+            return;
+          }
+        } catch {
+          // 不是握手回包：当作业务帧缓冲（下面统一处理）
+        }
+        if (!settled) {
+          buffered.push(bytes);
+          return;
+        }
+      }
+      sink?.(bytes);
+    });
+
     socket.on('error', (err) => {
       if (!settled) {
         settled = true;
+        clearTimeout(timer);
         reject(err);
       }
     });
     socket.on('close', () => {
       if (!settled) {
         settled = true;
+        clearTimeout(timer);
         reject(new Error(`连 gate ${opts.host}:${opts.port} 在握手前被关闭`));
       }
       if (!closed) {

@@ -385,6 +385,71 @@ func (x *GateForwardClientRequestReconnect) GetContent() []byte {
 	return nil
 }
 
+// 会话目录占位：逻辑层在**认证之后**问 gate「这个用户现在归谁」，同时把自己写成新主人。
+//
+// 为什么要问 gate：旧会话可能在另一台 gate 上，只有跨 gate 共享的目录知道它的下落；
+// 而认证只能由逻辑层做（token 是业务语义），所以这个查询发生在认证之后。
+// gate 用一条 Lua 做「读旧值 + seq+1 + 写新值」，跨节点并发登录只有一个赢家拿到旧记录。
+type HubClaimUser struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	UserId        string                 `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	EntityId      string                 `protobuf:"bytes,2,opt,name=entity_id,json=entityId,proto3" json:"entity_id,omitempty"` // 新会话将要使用的实体 id（复用旧对象时就是旧 id）
+	ConnId        string                 `protobuf:"bytes,3,opt,name=conn_id,json=connId,proto3" json:"conn_id,omitempty"`       // 新连接
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *HubClaimUser) Reset() {
+	*x = HubClaimUser{}
+	mi := &file_logic_gate_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HubClaimUser) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HubClaimUser) ProtoMessage() {}
+
+func (x *HubClaimUser) ProtoReflect() protoreflect.Message {
+	mi := &file_logic_gate_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HubClaimUser.ProtoReflect.Descriptor instead.
+func (*HubClaimUser) Descriptor() ([]byte, []int) {
+	return file_logic_gate_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *HubClaimUser) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *HubClaimUser) GetEntityId() string {
+	if x != nil {
+		return x.EntityId
+	}
+	return ""
+}
+
+func (x *HubClaimUser) GetConnId() string {
+	if x != nil {
+		return x.ConnId
+	}
+	return ""
+}
+
 // 服务级请求：目标不是一个实体，而是一个"服务"（排行榜、跨服匹配、商城结算……）。
 // 这类请求没有 entity_id，靠 `service_name` 分发。
 type GateForwardClientRequestService struct {
@@ -399,7 +464,7 @@ type GateForwardClientRequestService struct {
 
 func (x *GateForwardClientRequestService) Reset() {
 	*x = GateForwardClientRequestService{}
-	mi := &file_logic_gate_proto_msgTypes[5]
+	mi := &file_logic_gate_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -411,7 +476,7 @@ func (x *GateForwardClientRequestService) String() string {
 func (*GateForwardClientRequestService) ProtoMessage() {}
 
 func (x *GateForwardClientRequestService) ProtoReflect() protoreflect.Message {
-	mi := &file_logic_gate_proto_msgTypes[5]
+	mi := &file_logic_gate_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -424,7 +489,7 @@ func (x *GateForwardClientRequestService) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GateForwardClientRequestService.ProtoReflect.Descriptor instead.
 func (*GateForwardClientRequestService) Descriptor() ([]byte, []int) {
-	return file_logic_gate_proto_rawDescGZIP(), []int{5}
+	return file_logic_gate_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *GateForwardClientRequestService) GetServiceName() string {
@@ -484,7 +549,11 @@ const file_logic_gate_proto_rawDesc = "" +
 	"\tgate_name\x18\x01 \x01(\tR\bgateName\x12\x17\n" +
 	"\aconn_id\x18\x02 \x01(\tR\x06connId\x12\x17\n" +
 	"\auser_id\x18\x03 \x01(\tR\x06userId\x12\x18\n" +
-	"\acontent\x18\x04 \x01(\fR\acontent\"\x94\x01\n" +
+	"\acontent\x18\x04 \x01(\fR\acontent\"]\n" +
+	"\fHubClaimUser\x12\x17\n" +
+	"\auser_id\x18\x01 \x01(\tR\x06userId\x12\x1b\n" +
+	"\tentity_id\x18\x02 \x01(\tR\bentityId\x12\x17\n" +
+	"\aconn_id\x18\x03 \x01(\tR\x06connId\"\x94\x01\n" +
 	"\x1fGateForwardClientRequestService\x12!\n" +
 	"\fservice_name\x18\x01 \x01(\tR\vserviceName\x12\x1b\n" +
 	"\tgate_name\x18\x02 \x01(\tR\bgateName\x12\x17\n" +
@@ -503,19 +572,20 @@ func file_logic_gate_proto_rawDescGZIP() []byte {
 	return file_logic_gate_proto_rawDescData
 }
 
-var file_logic_gate_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_logic_gate_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
 var file_logic_gate_proto_goTypes = []any{
 	(*ClientRequestHub)(nil),                  // 0: fw.ClientRequestHub
 	(*ClientResponseHub)(nil),                 // 1: fw.ClientResponseHub
 	(*ClientNotifyHub)(nil),                   // 2: fw.ClientNotifyHub
 	(*ClientDisconnect)(nil),                  // 3: fw.ClientDisconnect
 	(*GateForwardClientRequestReconnect)(nil), // 4: fw.GateForwardClientRequestReconnect
-	(*GateForwardClientRequestService)(nil),   // 5: fw.GateForwardClientRequestService
-	(*ErrorCode)(nil),                         // 6: fw.ErrorCode
+	(*HubClaimUser)(nil),                      // 5: fw.HubClaimUser
+	(*GateForwardClientRequestService)(nil),   // 6: fw.GateForwardClientRequestService
+	(*ErrorCode)(nil),                         // 7: fw.ErrorCode
 }
 var file_logic_gate_proto_depIdxs = []int32{
-	6, // 0: fw.ClientResponseHub.error:type_name -> fw.ErrorCode
-	6, // 1: fw.ClientDisconnect.error:type_name -> fw.ErrorCode
+	7, // 0: fw.ClientResponseHub.error:type_name -> fw.ErrorCode
+	7, // 1: fw.ClientDisconnect.error:type_name -> fw.ErrorCode
 	2, // [2:2] is the sub-list for method output_type
 	2, // [2:2] is the sub-list for method input_type
 	2, // [2:2] is the sub-list for extension type_name
@@ -535,7 +605,7 @@ func file_logic_gate_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_logic_gate_proto_rawDesc), len(file_logic_gate_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   6,
+			NumMessages:   7,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

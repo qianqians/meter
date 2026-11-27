@@ -10,7 +10,7 @@ import { create, toBinary } from '@bufbuild/protobuf';
 
 import { MsgType } from './gen/envelope_pb';
 import { GateForwardHubCallGroupSchema } from './gen/gate_logic_pb';
-import { envelopeBytes, type Entity } from './entity';
+import { envelopeBytes, type Downlink, type Entity } from './entity';
 
 /** 实体的视图内容（怎么序列化成 bytes 是业务的事）。 */
 export type ViewContent = (e: Entity) => Uint8Array;
@@ -23,10 +23,10 @@ export class Group {
   readonly id: string;
   private readonly members = new Set<Entity>();
   private readonly view: ViewContent;
-  private readonly down: { send(bytes: Uint8Array): void };
+  private readonly down: Downlink;
   readonly stats: GroupStats = { broadcasts: 0 };
 
-  constructor(id: string, down: { send(bytes: Uint8Array): void }, view: ViewContent) {
+  constructor(id: string, down: Downlink, view: ViewContent) {
     this.id = id;
     this.down = down;
     this.view = view;
@@ -77,19 +77,28 @@ export class Group {
   /**
    * 广播给组内所有玩家：gate.forwardHubCallGroup（gate 侧按连接去重）。
    * content 是业务消息的编码字节；entityId 填广播的"来源实体"（可为空）。
+   *
+   * **按 gate 分组**：一条连接名单只对一台 gate 有意义（`conn_id` 是 gate 内唯一的），
+   * 所以组内玩家分散在多台 gate 时，一条广播会变成每台 gate 一条消息。
    */
   rpcNotify(method: string, content: Uint8Array, opts: { from?: string } = {}): void {
-    const connIds = [...this.members]
-      .filter((e) => e.isPlayer)
-      .map((e) => e.connId!);
+    const byGate = new Map<string, string[]>();
+    for (const e of this.members) {
+      if (!e.isPlayer || e.gateName === undefined) continue;
+      const list = byGate.get(e.gateName) ?? [];
+      list.push(e.connId!);
+      byGate.set(e.gateName, list);
+    }
     this.stats.broadcasts++;
-    this.down.send(envelopeBytes(MsgType.MSG_NOTIFY, 'gate.forwardHubCallGroup', 0, 0,
-      toBinary(GateForwardHubCallGroupSchema, create(GateForwardHubCallGroupSchema, {
-        connId: connIds,
-        entityId: opts.from ?? '',
-        method,
-        content,
-      }))));
+    for (const [gateName, connIds] of byGate) {
+      this.down.send(gateName, envelopeBytes(MsgType.MSG_NOTIFY, 'gate.forwardHubCallGroup', 0, 0,
+        toBinary(GateForwardHubCallGroupSchema, create(GateForwardHubCallGroupSchema, {
+          connId: connIds,
+          entityId: opts.from ?? '',
+          method,
+          content,
+        }))));
+    }
   }
 
   /** 清空（服务器停机/组销毁时）：所有成员互相删除视图。 */

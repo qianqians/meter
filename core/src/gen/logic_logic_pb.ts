@@ -10,7 +10,44 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file logic_logic.proto.
  */
 export const file_logic_logic: GenFile = /*@__PURE__*/
-  fileDesc("ChFsb2dpY19sb2dpYy5wcm90bxICZnciVQoPQ3Jvc3NDYWxsTm90aWZ5Eg8KB3NyY19odWIYASABKAkSDgoGbWV0aG9kGAIgASgJEg8KB2NvbnRlbnQYAyABKAwSEAoIdHJhY2VfaWQYBCABKAlCFFoSbWV0ZXIvc2NoZW1hL3BiO3BiYgZwcm90bzM");
+  fileDesc("ChFsb2dpY19sb2dpYy5wcm90bxICZnciaQoSSHViU2Vzc2lvblJlcGxhY2VkEg8KB3VzZXJfaWQYASABKAkSEQoJZW50aXR5X2lkGAIgASgJEhEKCWdhdGVfbmFtZRgDIAEoCRIPCgdjb25uX2lkGAQgASgJEgsKA3NlcRgFIAEoBCJVCg9Dcm9zc0NhbGxOb3RpZnkSDwoHc3JjX2h1YhgBIAEoCRIOCgZtZXRob2QYAiABKAkSDwoHY29udGVudBgDIAEoDBIQCgh0cmFjZV9pZBgEIAEoCUIUWhJtZXRlci9zY2hlbWEvcGI7cGJiBnByb3RvMw");
+
+/**
+ * @generated from message fw.HubSessionReplaced
+ */
+export type HubSessionReplaced = Message<"fw.HubSessionReplaced"> & {
+  /**
+   * @generated from field: string user_id = 1;
+   */
+  userId: string;
+
+  /**
+   * @generated from field: string entity_id = 2;
+   */
+  entityId: string;
+
+  /**
+   * @generated from field: string gate_name = 3;
+   */
+  gateName: string;
+
+  /**
+   * @generated from field: string conn_id = 4;
+   */
+  connId: string;
+
+  /**
+   * @generated from field: uint64 seq = 5;
+   */
+  seq: bigint;
+};
+
+/**
+ * Describes the message fw.HubSessionReplaced.
+ * Use `create(HubSessionReplacedSchema)` to create a new message.
+ */
+export const HubSessionReplacedSchema: GenMessage<HubSessionReplaced> = /*@__PURE__*/
+  messageDesc(file_logic_logic, 0);
 
 /**
  * @generated from message fw.CrossCallNotify
@@ -42,5 +79,5 @@ export type CrossCallNotify = Message<"fw.CrossCallNotify"> & {
  * Use `create(CrossCallNotifySchema)` to create a new message.
  */
 export const CrossCallNotifySchema: GenMessage<CrossCallNotify> = /*@__PURE__*/
-  messageDesc(file_logic_logic, 0);
+  messageDesc(file_logic_logic, 1);
 

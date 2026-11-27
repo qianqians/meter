@@ -47,6 +47,30 @@ export interface NatsLike {
   close(): void;
 }
 
+/** 节点总线（server.ts 的 NodeBus 与它同形）：节点 ↔ 节点的一次性通知。 */
+export interface NodeBusLike {
+  publish(subject: string, body: Uint8Array): void;
+  /** 返回退订函数。 */
+  subscribe(subject: string, onMessage: (body: Uint8Array) => void): () => void;
+}
+
+/**
+ * 把 MQ 包成节点总线。subject 用 `hub_{nodeId}_mq`（见 server.ts 的 `ticketSubject`）——
+ * 与 `entity_{id}_*_mq` 是同一套旁路，区别只是收件人是"某个节点"而不是"实体所在节点"。
+ */
+export function createBus(mq: Mq): NodeBusLike {
+  return {
+    publish: (subject, body) => mq.publish(subject, body),
+    subscribe: (subject, onMessage) => {
+      const it = mq.consume(subject);
+      void (async () => {
+        for await (const body of it) onMessage(body);
+      })();
+      return () => it.cancel();
+    },
+  };
+}
+
 /** 慢消费者的缓冲上限：满了丢弃（旁路 at-most-once，慢消费者不反压 NATS 的分发线程）。 */
 const QUEUE_LIMIT = 128;
 

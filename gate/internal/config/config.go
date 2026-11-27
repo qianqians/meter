@@ -56,9 +56,13 @@ type Consul struct {
 }
 
 type Redis struct {
-	CacheURL      string `json:"cache_url"` // 只做缓存；消息队列已改用 NATS（见 NATS 段）
+	// Enabled 打开**跨 gate 会话目录**（session:{userId}）。它只影响跨 gate 顶号：
+	// 关掉时同 gate 内的顶号照样工作，但换 gate 登录会退化成"两个写者"。
+	Enabled       bool   `json:"enabled"`
+	CacheURL      string `json:"cache_url"`
 	PoolSize      int    `json:"pool_size"`
 	DialTimeoutMs int    `json:"dial_timeout_ms"`
+	SessionTTLS   int    `json:"session_ttl_s"` // 会话记录的 TTL；各 gate 按 TTL/3 续期
 }
 
 type NATS struct {
@@ -95,9 +99,11 @@ func Default() Config {
 			Tags:            []string{"gate", "internal"},
 		},
 		Redis: Redis{
+			Enabled:       false, // 只跑单 gate 时不需要目录；跨 gate 顶号必须打开
 			CacheURL:      "redis://127.0.0.1:6379/0",
 			PoolSize:      16,
 			DialTimeoutMs: 3000,
+			SessionTTLS:   90,
 		},
 		NATS: NATS{
 			Enabled: false, // 本地默认不开：TCP 直连层已够用，MQ 是旁路
@@ -243,6 +249,14 @@ func (c Config) Validate() error {
 	if c.Listen.MaxFrameBytes > 1<<24 {
 		return fmt.Errorf("max_frame_bytes 超过帧头 u24 能表达的 16 MB")
 	}
+	if c.Redis.Enabled {
+		if c.Redis.CacheURL == "" {
+			return fmt.Errorf("redis.enabled=true 但 redis.cache_url 为空")
+		}
+		if c.Redis.SessionTTLS < 10 {
+			return fmt.Errorf("redis.session_ttl_s 至少 10 秒（会决定旧会话多久后被判定为死节点）")
+		}
+	}
 	return nil
 }
 
@@ -260,6 +274,12 @@ func (c Config) ConsulTTL() time.Duration {
 func (c Config) ReportInterval() time.Duration {
 	return time.Duration(c.Consul.ReportIntervalS) * time.Second
 }
+
+// SessionTTL 会话目录记录的存活时间。
+func (c Config) SessionTTL() time.Duration {
+	return time.Duration(c.Redis.SessionTTLS) * time.Second
+}
+
 func (c Config) ReadTimeout() time.Duration {
 	return time.Duration(c.Listen.ReadTimeoutS) * time.Second
 }
@@ -316,10 +336,13 @@ func (c Config) Dump() ([]byte, error) {
 			"//report_interval_s": "每多少秒向 consul 上报一次状态（同时充当 TTL 心跳）",
 		},
 		"redis": map[string]any{
+			"enabled":         c.Redis.Enabled,
 			"cache_url":       c.Redis.CacheURL,
 			"pool_size":       c.Redis.PoolSize,
 			"dial_timeout_ms": c.Redis.DialTimeoutMs,
-			"//cache_url":     "缓存：会话热点数据、限流计数（消息队列已改用 nats 段）",
+			"session_ttl_s":   c.Redis.SessionTTLS,
+			"//enabled":       "跨 gate 会话目录（session:{userId}）；只跑单 gate 时可以关，跨 gate 顶号必须开",
+			"//session_ttl_s": "会话记录存活时间；各 gate 按 TTL/3 续期，gate 崩了记录自然过期",
 		},
 		"nats": map[string]any{
 			"enabled":   c.NATS.Enabled,

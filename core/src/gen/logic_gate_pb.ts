@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file logic_gate.proto.
  */
 export const file_logic_gate: GenFile = /*@__PURE__*/
-  fileDesc("ChBsb2dpY19nYXRlLnByb3RvEgJmdyJXChBDbGllbnRSZXF1ZXN0SHViEg8KB2Nvbm5faWQYASABKAkSEQoJZW50aXR5X2lkGAIgASgJEg8KB2NvbnRlbnQYAyABKAwSDgoGbWV0aG9kGAQgASgJImUKEUNsaWVudFJlc3BvbnNlSHViEhEKCWVudGl0eV9pZBgBIAEoCRIcCgVlcnJvchgCIAEoCzINLmZ3LkVycm9yQ29kZRIPCgdjb250ZW50GAMgASgMEg4KBm1ldGhvZBgEIAEoCSJWCg9DbGllbnROb3RpZnlIdWISDwoHY29ubl9pZBgBIAEoCRIRCgllbnRpdHlfaWQYAiABKAkSDwoHY29udGVudBgDIAEoDBIOCgZtZXRob2QYBCABKAkiZQoQQ2xpZW50RGlzY29ubmVjdBIPCgdjb25uX2lkGAEgASgJEg8KB3VzZXJfaWQYAiABKAkSEQoJZW50aXR5X2lkGAMgASgJEhwKBWVycm9yGAQgASgLMg0uZncuRXJyb3JDb2RlImkKIUdhdGVGb3J3YXJkQ2xpZW50UmVxdWVzdFJlY29ubmVjdBIRCglnYXRlX25hbWUYASABKAkSDwoHY29ubl9pZBgCIAEoCRIPCgd1c2VyX2lkGAMgASgJEg8KB2NvbnRlbnQYBCABKAwibAofR2F0ZUZvcndhcmRDbGllbnRSZXF1ZXN0U2VydmljZRIUCgxzZXJ2aWNlX25hbWUYASABKAkSEQoJZ2F0ZV9uYW1lGAIgASgJEg8KB2Nvbm5faWQYAyABKAkSDwoHY29udGVudBgEIAEoDEIUWhJtZXRlci9zY2hlbWEvcGI7cGJiBnByb3RvMw", [file_common]);
+  fileDesc("ChBsb2dpY19nYXRlLnByb3RvEgJmdyJXChBDbGllbnRSZXF1ZXN0SHViEg8KB2Nvbm5faWQYASABKAkSEQoJZW50aXR5X2lkGAIgASgJEg8KB2NvbnRlbnQYAyABKAwSDgoGbWV0aG9kGAQgASgJImUKEUNsaWVudFJlc3BvbnNlSHViEhEKCWVudGl0eV9pZBgBIAEoCRIcCgVlcnJvchgCIAEoCzINLmZ3LkVycm9yQ29kZRIPCgdjb250ZW50GAMgASgMEg4KBm1ldGhvZBgEIAEoCSJWCg9DbGllbnROb3RpZnlIdWISDwoHY29ubl9pZBgBIAEoCRIRCgllbnRpdHlfaWQYAiABKAkSDwoHY29udGVudBgDIAEoDBIOCgZtZXRob2QYBCABKAkiZQoQQ2xpZW50RGlzY29ubmVjdBIPCgdjb25uX2lkGAEgASgJEg8KB3VzZXJfaWQYAiABKAkSEQoJZW50aXR5X2lkGAMgASgJEhwKBWVycm9yGAQgASgLMg0uZncuRXJyb3JDb2RlImkKIUdhdGVGb3J3YXJkQ2xpZW50UmVxdWVzdFJlY29ubmVjdBIRCglnYXRlX25hbWUYASABKAkSDwoHY29ubl9pZBgCIAEoCRIPCgd1c2VyX2lkGAMgASgJEg8KB2NvbnRlbnQYBCABKAwiQwoMSHViQ2xhaW1Vc2VyEg8KB3VzZXJfaWQYASABKAkSEQoJZW50aXR5X2lkGAIgASgJEg8KB2Nvbm5faWQYAyABKAkibAofR2F0ZUZvcndhcmRDbGllbnRSZXF1ZXN0U2VydmljZRIUCgxzZXJ2aWNlX25hbWUYASABKAkSEQoJZ2F0ZV9uYW1lGAIgASgJEg8KB2Nvbm5faWQYAyABKAkSDwoHY29udGVudBgEIAEoDEIUWhJtZXRlci9zY2hlbWEvcGI7cGJiBnByb3RvMw", [file_common]);
 
 /**
  * @generated from message fw.ClientRequestHub
@@ -175,6 +175,33 @@ export const GateForwardClientRequestReconnectSchema: GenMessage<GateForwardClie
   messageDesc(file_logic_gate, 4);
 
 /**
+ * @generated from message fw.HubClaimUser
+ */
+export type HubClaimUser = Message<"fw.HubClaimUser"> & {
+  /**
+   * @generated from field: string user_id = 1;
+   */
+  userId: string;
+
+  /**
+   * @generated from field: string entity_id = 2;
+   */
+  entityId: string;
+
+  /**
+   * @generated from field: string conn_id = 3;
+   */
+  connId: string;
+};
+
+/**
+ * Describes the message fw.HubClaimUser.
+ * Use `create(HubClaimUserSchema)` to create a new message.
+ */
+export const HubClaimUserSchema: GenMessage<HubClaimUser> = /*@__PURE__*/
+  messageDesc(file_logic_gate, 5);
+
+/**
  * @generated from message fw.GateForwardClientRequestService
  */
 export type GateForwardClientRequestService = Message<"fw.GateForwardClientRequestService"> & {
@@ -204,5 +231,5 @@ export type GateForwardClientRequestService = Message<"fw.GateForwardClientReque
  * Use `create(GateForwardClientRequestServiceSchema)` to create a new message.
  */
 export const GateForwardClientRequestServiceSchema: GenMessage<GateForwardClientRequestService> = /*@__PURE__*/
-  messageDesc(file_logic_gate, 5);
+  messageDesc(file_logic_gate, 6);
 

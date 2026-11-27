@@ -12,15 +12,20 @@ import {
   ClientDisconnectSchema,
   ClientResponseHubSchema,
   GateForwardClientRequestServiceSchema,
+  HubClaimUserSchema,
 } from './gen/logic_gate_pb';
 import {
   GateForwardHubCallGlobalSchema,
+  GateOwnerInfoSchema,
   HubCreatePlayerEntitySchema,
   HubKickOffClientSchema,
   GateForwardHubCallClientSchema,
 } from './gen/gate_logic_pb';
 import { RefreshEntitySchema } from './gen/client_pb';
+import { HubSessionReplacedSchema } from './gen/logic_logic_pb';
+import { ErrorCodeSchema } from './gen/common_pb';
 import { createLogicServer, type Transport } from './server';
+import { envelopeBytes } from './entity';
 
 /** 内存 pair：一端 send 的 envelope 字节立刻进另一端 onData。 */
 function pair(): [Transport, Transport] {
@@ -33,10 +38,32 @@ function pair(): [Transport, Transport] {
 }
 
 /** gate 侧：收逻辑服的下行（解析成 Envelope 列表）。 */
-function fakeGate() {
+/** gate 对 `hub.claimUser` 的回复；'error' = 目录不可用（status=1）。 */
+type ClaimReply = { nodeId?: string; gateName?: string; connId?: string; entityId?: string; seq?: bigint };
+
+function fakeGate(opts: { claim?: (req: { userId: string; entityId: string; connId: string }) => ClaimReply | 'error' } = {}) {
   const [gateSide, logicSide] = pair();
   const down: { env: ReturnType<typeof fromBinary<typeof EnvelopeSchema>>; bytes: Uint8Array }[] = [];
-  gateSide.onData((bytes) => down.push({ env: fromBinary(EnvelopeSchema, bytes), bytes }));
+  gateSide.onData((bytes) => {
+    const env = fromBinary(EnvelopeSchema, bytes);
+    // 会话目录占位：假 gate 在这里替真 gate + Redis 作答（真实实现见 gate/internal/sessiondir）
+    if (env.method === 'hub.claimUser') {
+      const req = fromBinary(HubClaimUserSchema, env.body);
+      const reply = opts.claim?.(req) ?? {};
+      if (reply === 'error') {
+        gateSide.send(toBinary(EnvelopeSchema, create(EnvelopeSchema, {
+          msgType: MsgType.MSG_RESPONSE, method: 'gate.ownerInfo', callbackId: env.callbackId, status: 1,
+        })));
+        return;
+      }
+      gateSide.send(toBinary(EnvelopeSchema, create(EnvelopeSchema, {
+        msgType: MsgType.MSG_RESPONSE, method: 'gate.ownerInfo', callbackId: env.callbackId, status: 0,
+        body: toBinary(GateOwnerInfoSchema, create(GateOwnerInfoSchema, reply)),
+      })));
+      return;
+    }
+    down.push({ env, bytes });
+  });
   const push = (env: { msgType: MsgType; method: string; callbackId?: number; body: Uint8Array }) =>
     gateSide.send(toBinary(EnvelopeSchema, create(EnvelopeSchema, env)));
   return {
@@ -55,8 +82,8 @@ describe('登录：gate.clientLogin → hub.createPlayerEntity', () => {
   it('接受：建实体 + 发 createPlayerEntity（含 conn/user/entity/type/content）', async () => {
     const g = fakeGate();
     const server = createLogicServer({
-      transport: g.logicSide, nodeId: 'n1',
-      onLogin: (login: Login, connId) => ({
+      gates: [{ name: 'g1', transport: g.logicSide }], nodeId: 'n1',
+      onLogin: (login: Login, { connId }) => ({
         ok: true, userId: `u-${login.token}`, entityId: `e-${connId}`,
         entityType: 'player', content: new Uint8Array([1]),
       }),
@@ -86,7 +113,7 @@ describe('登录：gate.clientLogin → hub.createPlayerEntity', () => {
   it('拒绝：hub.kickOffClient（code + detail）', async () => {
     const g = fakeGate();
     createLogicServer({
-      transport: g.logicSide, nodeId: 'n1',
+      gates: [{ name: 'g1', transport: g.logicSide }], nodeId: 'n1',
       onLogin: () => ({ ok: false, code: 4, detail: 'token 过期' }),
     });
 
@@ -109,7 +136,7 @@ describe('客户端调用：gate.clientRequest → entity.dispatch → 回包闭
   async function setupWithPlayer() {
     const g = fakeGate();
     const server = createLogicServer({
-      transport: g.logicSide, nodeId: 'n1',
+      gates: [{ name: 'g1', transport: g.logicSide }], nodeId: 'n1',
       onLogin: () => ({ ok: true, userId: 'u1', entityId: 'e1', entityType: 'player', content: new Uint8Array() }),
       onPlayerCreate: (p) => {
         p.register('entity.attack', RefreshEntitySchema, RefreshEntitySchema, (req) =>
@@ -163,7 +190,7 @@ describe('服务端调客户端：gate.clientResponse 配对', () => {
     const g = fakeGate();
     let player: import('./entity').Entity | undefined;
     createLogicServer({
-      transport: g.logicSide, nodeId: 'n1',
+      gates: [{ name: 'g1', transport: g.logicSide }], nodeId: 'n1',
       onLogin: () => ({ ok: true, userId: 'u1', entityId: 'e1', entityType: 'player', content: new Uint8Array() }),
       onPlayerCreate: (p) => { player = p; },
     });
@@ -197,8 +224,8 @@ describe('断开与组', () => {
   it('gate.clientDisconnect：销毁玩家 + 从组里退 + 组内其他玩家收到 deleteRemote', async () => {
     const g = fakeGate();
     const server = createLogicServer({
-      transport: g.logicSide, nodeId: 'n1',
-      onLogin: (_l, connId) => ({ ok: true, userId: `u-${connId}`, entityId: `e-${connId}`, entityType: 'player', content: new Uint8Array() }),
+      gates: [{ name: 'g1', transport: g.logicSide }], nodeId: 'n1',
+      onLogin: (_l, { connId }) => ({ ok: true, userId: `u-${connId}`, entityId: `e-${connId}`, entityType: 'player', content: new Uint8Array() }),
     });
     for (const c of ['c1', 'c2']) {
       g.push({ msgType: MsgType.MSG_REQUEST, method: 'gate.clientLogin', body:
@@ -228,7 +255,7 @@ describe('global 广播', () => {
   it('global.rpcNotify → gate.forwardHubCallGlobal（含 method/content）', async () => {
     const g = fakeGate();
     const server = createLogicServer({
-      transport: g.logicSide, nodeId: 'n1',
+      gates: [{ name: 'g1', transport: g.logicSide }], nodeId: 'n1',
       onLogin: () => ({ ok: true, userId: 'u1', entityId: 'e1', entityType: 'player', content: new Uint8Array() }),
     });
     server.global.rpcNotify('server.notice', new Uint8Array([1, 2]), 'e1');
@@ -251,7 +278,7 @@ describe('执行模型：同一实体的两个 REQUEST 串行', () => {
     const order: string[] = [];
 
     createLogicServer({
-      transport: g.logicSide, nodeId: 'n1',
+      gates: [{ name: 'g1', transport: g.logicSide }], nodeId: 'n1',
       onLogin: () => ({ ok: true, userId: 'u1', entityId: 'e1', entityType: 'player', content: new Uint8Array() }),
       onPlayerCreate: (p) => {
         p.register('entity.slow', RefreshEntitySchema, RefreshEntitySchema, async () => {
@@ -289,5 +316,278 @@ describe('执行模型：同一实体的两个 REQUEST 串行', () => {
     release();
     await g.waitIdle();
     expect(order).toEqual(['slow:start', 'slow:end', 'fast']);
+  });
+});
+
+describe('顶号：同账号重新登录', () => {
+  /** 起一个逻辑服；onLogin 按 connId 给固定的 userId/entityId（可覆盖）。 */
+  function setup(opts: {
+    entityId?: (connId: string) => string;
+    userId?: string;
+    onDestroy?: (reason: string) => void;
+  } = {}) {
+    const g = fakeGate();
+    const userId = opts.userId ?? 'u1';
+    const entityId = opts.entityId ?? (() => 'e1');
+    const server = createLogicServer({
+      gates: [{ name: 'g1', transport: g.logicSide }], nodeId: 'n1',
+      onLogin: (_login, { connId }) => ({
+        ok: true, userId, entityId: entityId(connId), entityType: 'player', content: new Uint8Array([1]),
+      }),
+      onPlayerCreate: (p) => {
+        p.register('entity.echo', RefreshEntitySchema, RefreshEntitySchema, () =>
+          create(RefreshEntitySchema, { entityId: p.id }));
+      },
+      onPlayerDestroy: (p, reason) => { opts.onDestroy?.(reason); void p; },
+    });
+    const login = (connId: string) => g.push({
+      msgType: MsgType.MSG_REQUEST, method: 'gate.clientLogin', body:
+        toBinary(GateForwardClientRequestServiceSchema, create(GateForwardClientRequestServiceSchema, {
+          serviceName: 'auth', gateName: 'g1', connId, content: loginBytes(connId),
+        })),
+    });
+    return { g, server, login };
+  }
+
+  it('同 userId + 同 entityId：复用同一个对象（换 connId、重发 create_player、旧在途请求被拒）', async () => {
+    const { g, server, login } = setup();
+
+    login('c1');
+    await g.waitIdle();
+    const first = server.entityOf('e1');
+    if (!first) throw new Error('第一次登录没建实体');
+
+    // 旧连接上的在途调用（服务端调客户端，等回包）。先挂上断言，否则 rebind 的 reject
+    // 会在 await 之前被判成 unhandled rejection。
+    const stale = first.rpcRequest('entity.query', new Uint8Array(0), RefreshEntitySchema, { timeoutMs: 10_000 });
+    const staleRejected = expect(stale).rejects.toMatchObject({ code: 7 });
+
+    login('c2');
+    await g.waitIdle();
+
+    expect(server.entityOf('e1')).toBe(first); // 同一个对象：内存状态不丢
+    expect(first.connId).toBe('c2');
+    expect(server.stats.rebinds).toBe(1);
+    await staleRejected; // 旧连接不可能再回包
+
+    // 新连接收到 create_player（gate 据此把会话绑到 c2）
+    const created = g.down.filter(({ env }) => env.method === 'hub.createPlayerEntity');
+    const body = fromBinary(HubCreatePlayerEntitySchema, created[created.length - 1]!.env.body);
+    expect(body.connId).toBe('c2');
+    expect(body.entityId).toBe('e1');
+  });
+
+  it('同 userId 但 entityId 变了：旧实体以 replaced 退役，新实体是另一个对象', async () => {
+    const reasons: string[] = [];
+    const { g, server, login } = setup({ entityId: (c) => `e-${c}`, onDestroy: (r) => reasons.push(r) });
+
+    login('c1');
+    await g.waitIdle();
+    const first = server.entityOf('e-c1');
+    login('c2');
+    await g.waitIdle();
+
+    expect(server.entityOf('e-c1')).toBeUndefined();
+    expect(server.entityOf('e-c2')).toBeDefined();
+    expect(server.entityOf('e-c2')).not.toBe(first);
+    expect(reasons).toEqual(['replaced']);
+    expect(server.entityOfUser('u1')).toBe(server.entityOf('e-c2'));
+  });
+
+  it('entityId 被另一个账号占着：旧实体以 replaced 退役', async () => {
+    const reasons: string[] = [];
+    const g = fakeGate();
+    let n = 0;
+    const server = createLogicServer({
+      gates: [{ name: 'g1', transport: g.logicSide }], nodeId: 'n1',
+      onLogin: () => ({ ok: true, userId: `u${++n}`, entityId: 'e1', entityType: 'player', content: new Uint8Array() }),
+      onPlayerDestroy: (_p, reason) => { reasons.push(reason); },
+    });
+    const login = (connId: string) => g.push({
+      msgType: MsgType.MSG_REQUEST, method: 'gate.clientLogin', body:
+        toBinary(GateForwardClientRequestServiceSchema, create(GateForwardClientRequestServiceSchema, {
+          serviceName: 'auth', gateName: 'g1', connId, content: loginBytes(connId),
+        })),
+    });
+
+    login('c1');
+    await g.waitIdle();
+    login('c2');
+    await g.waitIdle();
+
+    expect(reasons).toEqual(['replaced']);
+    expect(server.entityOf('e1')?.userId).toBe('u2');
+  });
+
+  it('普通断开：reason 是 disconnect', async () => {
+    const reasons: string[] = [];
+    const { g, server, login } = setup({ onDestroy: (r) => reasons.push(r) });
+
+    login('c1');
+    await g.waitIdle();
+    g.push({ msgType: MsgType.MSG_NOTIFY, method: 'gate.clientDisconnect', body:
+      toBinary(ClientDisconnectSchema, create(ClientDisconnectSchema, { connId: 'c1', userId: 'u1', entityId: 'e1' })) });
+    await g.waitIdle();
+
+    expect(reasons).toEqual(['disconnect']);
+    expect(server.entityOf('e1')).toBeUndefined();
+    expect(server.entityOfUser('u1')).toBeUndefined();
+  });
+
+  it('断开带 DUPLICATE_LOGIN(4)：reason 是 replaced', async () => {
+    const reasons: string[] = [];
+    const { g, login } = setup({ onDestroy: (r) => reasons.push(r) });
+    void login;
+    g.push({ msgType: MsgType.MSG_REQUEST, method: 'gate.clientLogin', body:
+      toBinary(GateForwardClientRequestServiceSchema, create(GateForwardClientRequestServiceSchema, {
+        serviceName: 'auth', gateName: 'g1', connId: 'c1', content: loginBytes('c1'),
+      })) });
+    await g.waitIdle();
+
+    g.push({ msgType: MsgType.MSG_NOTIFY, method: 'gate.clientDisconnect', body:
+      toBinary(ClientDisconnectSchema, create(ClientDisconnectSchema, {
+        connId: 'c1', userId: 'u1', entityId: 'e1',
+        error: create(ErrorCodeSchema, { code: 4, detail: '该账号已在别处登录' }),
+      })) });
+    await g.waitIdle();
+    expect(reasons).toEqual(['replaced']);
+  });
+});
+
+describe('多 gate 寻址', () => {
+  it('下行按实体所属的 gate 投递；广播发给每一台 gate', async () => {
+    const g1 = fakeGate();
+    const g2 = fakeGate();
+    const server = createLogicServer({
+      nodeId: 'n1',
+      gates: [
+        { name: 'g1', transport: g1.logicSide },
+        { name: 'g2', transport: g2.logicSide },
+      ],
+      onLogin: () => ({ ok: true, userId: 'u1', entityId: 'e1', entityType: 'player', content: new Uint8Array() }),
+      onPlayerCreate: (p) => {
+        p.register('entity.echo', RefreshEntitySchema, RefreshEntitySchema, () =>
+          create(RefreshEntitySchema, { entityId: p.id }));
+      },
+    });
+
+    // 客户端在 g2 上登录
+    g2.push({ msgType: MsgType.MSG_REQUEST, method: 'gate.clientLogin', body:
+      toBinary(GateForwardClientRequestServiceSchema, create(GateForwardClientRequestServiceSchema, {
+        serviceName: 'auth', gateName: 'g2', connId: 'c9', content: loginBytes(),
+      })) });
+    await g2.waitIdle();
+
+    expect(server.entityOf('e1')?.gateName).toBe('g2');
+    expect(g2.down.some(({ env }) => env.method === 'hub.createPlayerEntity')).toBe(true);
+    expect(g1.down.length).toBe(0);
+
+    // 实体下行（回包）只走 g2
+    g2.push({ msgType: MsgType.MSG_REQUEST, method: 'gate.clientRequest', callbackId: 3, body:
+      toBinary(ClientRequestHubSchema, create(ClientRequestHubSchema, {
+        connId: 'c9', entityId: 'e1', method: 'entity.echo',
+        content: toBinary(RefreshEntitySchema, create(RefreshEntitySchema, {})),
+      })) });
+    await g2.waitIdle();
+    expect(g2.down.some(({ env }) => env.method === 'gate.forwardHubCallClient')).toBe(true);
+    expect(g1.down.length).toBe(0);
+
+    // 全服广播：两台 gate 各一条
+    server.global.rpcNotify('server.notice', new Uint8Array([1]), 'e1');
+    await g1.waitIdle();
+    await g2.waitIdle();
+    expect(g1.down.filter(({ env }) => env.method === 'gate.forwardHubCallGlobal').length).toBe(1);
+    expect(g2.down.filter(({ env }) => env.method === 'gate.forwardHubCallGlobal').length).toBe(1);
+  });
+
+  it('目标 gate 不在注册表里：计数丢弃，不猜链路', async () => {
+    const g1 = fakeGate();
+    const server = createLogicServer({
+      nodeId: 'n1',
+      gates: [{ name: 'g1', transport: g1.logicSide }],
+      onLogin: () => ({ ok: false, code: 1, detail: 'x' }),
+    });
+    // 从 g1 链路收到一条登录，但消息里写的是未知 gate：回包应被丢弃并计数
+    g1.push({ msgType: MsgType.MSG_REQUEST, method: 'gate.clientLogin', body:
+      toBinary(GateForwardClientRequestServiceSchema, create(GateForwardClientRequestServiceSchema, {
+        serviceName: 'auth', gateName: 'ghost', connId: 'c1', content: loginBytes(),
+      })) });
+    await g1.waitIdle();
+    expect(server.stats.loginRejected).toBe(1);
+    // 踢人消息要发给 ghost，但没有这条链路：计数丢弃，不猜一台 gate
+    expect(server.stats.unknownGate).toBe(1);
+    expect(server.stats.claimFailed).toBe(0); // 拒绝发生在占位之前
+  });
+});
+
+describe('跨节点顶号（会话目录 + 节点总线）', () => {
+  it('新节点通知旧节点：旧连接被踢、旧实体以 replaced 退役；迟到的通知被 seq 挡住', async () => {
+    // 假总线：subject → 订阅者
+    const subs = new Map<string, (b: Uint8Array) => void>();
+    const bus = {
+      publish: (subject: string, body: Uint8Array) => { queueMicrotask(() => subs.get(subject)?.(body)); },
+      subscribe: (subject: string, cb: (b: Uint8Array) => void) => {
+        subs.set(subject, cb);
+        return () => { subs.delete(subject); };
+      },
+    };
+    // 假目录：和 gate 侧那条 Lua 同语义（读旧值 + seq+1 + 写新值，回旧值）
+    type Rec = { nodeId: string; gateName: string; connId: string; entityId: string; seq: bigint };
+    const dir = new Map<string, Rec>();
+
+    const makeNode = (nodeId: string, gateName: string) => {
+      const reasons: string[] = [];
+      const g = fakeGate({
+        claim: (req) => {
+          const prev = dir.get(req.userId);
+          const next = { nodeId, gateName, connId: req.connId, entityId: req.entityId, seq: (prev?.seq ?? 0n) + 1n };
+          dir.set(req.userId, next);
+          return { ...(prev ?? {}), seq: next.seq }; // 旧主人字段 + 本次的 seq
+        },
+      });
+      const server = createLogicServer({
+        nodeId,
+        gates: [{ name: gateName, transport: g.logicSide }],
+        bus,
+        onLogin: () => ({ ok: true, userId: 'u1', entityId: 'e1', entityType: 'player', content: new Uint8Array() }),
+        onPlayerDestroy: (_p, r) => { reasons.push(r); },
+      });
+      const login = (connId: string) => g.push({ msgType: MsgType.MSG_REQUEST, method: 'gate.clientLogin', body:
+        toBinary(GateForwardClientRequestServiceSchema, create(GateForwardClientRequestServiceSchema, {
+          serviceName: 'auth', gateName, connId, content: loginBytes(connId),
+        })) });
+      return { nodeId, gateName, g, server, reasons, login };
+    };
+
+    const a = makeNode('n1', 'g1');
+    const b = makeNode('n2', 'g2');
+
+    a.login('c1');
+    await a.g.waitIdle();
+    expect(a.server.entityOf('e1')).toBeDefined();
+
+    b.login('c2');
+    await b.g.waitIdle();
+    await new Promise((r) => setTimeout(r, 0)); // 通知走 microtask
+
+    expect(a.server.entityOf('e1')).toBeUndefined();
+    expect(a.reasons).toEqual(['replaced']);
+    expect(a.server.stats.replacedByOther).toBe(1);
+    expect(b.server.entityOf('e1')?.connId).toBe('c2'); // 新会话在 n2/g2
+
+    // 旧连接是在**它自己的 gate** 上被踢的（conn_id 只在所属 gate 内有意义）
+    const kick = a.g.down.find(({ env }) => env.method === 'hub.kickOffClient');
+    expect(kick).toBeDefined();
+    const kb = fromBinary(HubKickOffClientSchema, kick!.env.body);
+    expect(kb.connId).toBe('c1');
+    expect(kb.error?.code).toBe(4);
+
+    // 迟到的同 seq 通知：不再退役一次
+    subs.get('hub_n1_mq')!(envelopeBytes(MsgType.MSG_NOTIFY, 'hub.sessionReplaced', 0, 0,
+      toBinary(HubSessionReplacedSchema, create(HubSessionReplacedSchema, {
+        userId: 'u1', entityId: 'e1', gateName: 'g1', connId: 'c1', seq: 2n,
+      }))));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(a.reasons).toEqual(['replaced']);
   });
 });

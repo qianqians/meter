@@ -108,6 +108,17 @@ func (t *Table) Rebind(connID, entityID, nodeID string) bool {
 	return true
 }
 
+// Snapshot 当前所有会话的快照（会话目录续期、状态上报用）。
+func (t *Table) Snapshot() []Session {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	out := make([]Session, 0, len(t.byConn))
+	for _, s := range t.byConn {
+		out = append(out, *s)
+	}
+	return out
+}
+
 // Len 当前已登录连接数。
 func (t *Table) Len() int {
 	t.mu.RLock()

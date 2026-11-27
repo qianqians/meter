@@ -18,7 +18,7 @@ var content64 = make([]byte, 64) // 典型上行消息体
 
 func benchHub(b *testing.B) (*Hub, *fakePeer, *fakePeer) {
 	sess := session.New()
-	h := New(sess, func() uint32 { return 42 }, "gate-bench", nil)
+	h := New(sess, func() uint32 { return 42 }, "gate-bench", nil, Options{})
 	client, logic := &fakePeer{}, &fakePeer{}
 	h.AddClient("c1", client)
 	h.AddLogic("n1", logic)

@@ -3,10 +3,13 @@
 // 方向：**logic 主动连 gate**（gate 是接入层，通常比逻辑层更靠外；这样逻辑层不需要知道
 // gate 的地址，扩容 gate 也不用改逻辑层配置）。一条 TCP 连接 = 一个逻辑节点。
 //
-// 握手（P0 占位）：连接建立后逻辑节点发第一条 `Envelope{method:"logic.hello", body=NodeDesc}
-// 不需要——我们把"节点 id"放在第一帧的 method 前缀里，见 hello 处理；真实现应该用
-// consul 的 service metadata 或一条 `LogicHello{node_id}` 消息。这里为了不新增 proto，
-// 先约定：第一帧必须是 `Envelope{method:"logic.hello", body = 不透明字节（utf8 的 node_id）}`。
+// 握手：
+//
+//	logic → gate   Envelope{method:"logic.hello", body = utf8 的 node_id}
+//	gate → logic   Envelope{method:"logic.hello.ack", body = GateHello{gate_name, proto_ver}}
+//
+// 回包不是客套：逻辑节点可以同时连多台 gate，它必须知道**每条链路对面是哪台**——
+// 实体记住自己在哪台 gate 上，cross-gate 顶号时才能把踢人消息发回旧连接那台。
 package logiclink
 
 import (
@@ -72,6 +75,18 @@ func (s *Server) serveConn(conn net.Conn) {
 					}
 					nodeID = string(env.GetBody())
 					s.hub.AddLogic(nodeID, peer)
+					// 告诉它这条链路是哪台 gate（见文件头）。发不出去就断开，别留一条"半认识"的链路。
+					ack, aerr := proto.Marshal(&pb.GateHello{
+						GateName: s.hub.GateName(),
+						ProtoVer: hub.ProtoVersion,
+					})
+					if aerr != nil || peer.Send(&pb.Envelope{
+						MsgType: pb.MsgType_MSG_NOTIFY, Method: "logic.hello.ack", Body: ack,
+					}) != nil {
+						log.Printf("逻辑链路: 回 hello.ack 失败，断开")
+						_ = conn.Close()
+						return
+					}
 					return
 				}
 				s.hub.OnLogic(nodeID, &env)

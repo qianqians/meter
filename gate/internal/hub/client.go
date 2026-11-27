@@ -17,7 +17,10 @@ import (
 // 接入层（WebSocket）只负责"把字节读成帧"，不做信封层的事。
 func (h *Hub) OnClientFrame(connID string, f frame.Frame) {
 	if len(f.Payload) == 0 {
-		return // len==0 的帧是 ping，接入层直接回空帧
+		// len==0 的帧是协议里的**保活帧**（不是空消息）：原样回一个空帧。
+		// 帧头的 ts 已经能算 RTT，这就是最省的 ping/pong。
+		h.sendPong(connID)
+		return
 	}
 	if ms, suspect := frame.OneWayDelayMs(h.now(), f.TS); suspect {
 		log.Printf("[%s] 异常时钟：延迟 %d ms（已 clamp，不参与判定）", connID, ms)
@@ -70,6 +73,9 @@ func (h *Hub) OnClient(connID string, env *pb.Envelope, up *pb.ClientUplink) {
 	case *pb.ClientUplink_Login:
 		// ④ 登录不是透传：逻辑层需要知道"谁在哪台 gate 的哪条连接上登录"，
 		// 否则回包（HubCreatePlayerEntity）找不到目标连接。
+		// 同时记下客户端的配对号：结果要等逻辑层裁决（createPlayerEntity / kickOffClient），
+		// 那两条消息里没有它。
+		h.noteLogin(connID, env.GetCallbackId(), env.GetMethod())
 		b, err := protoMarshal(&pb.GateForwardClientRequestService{
 			ServiceName: "auth",
 			GateName:    h.gateName,
@@ -97,7 +103,12 @@ func (h *Hub) OnClient(connID string, env *pb.Envelope, up *pb.ClientUplink) {
 		h.sendToLogic(connID, "gate.clientReconnect", pb.MsgType_MSG_REQUEST, env.GetCallbackId(), b)
 		h.stats.forwardedUp.Add(1)
 
-	case *pb.ClientUplink_Logout, *pb.ClientUplink_Heartbeat, *pb.ClientUplink_Ack:
+	case *pb.ClientUplink_Heartbeat:
+		// 框架消息，gate 直接答：逻辑层不处理它（server.ts 的 clientUplink 只认 logout）。
+		// 多一跳没有任何收益，而这里多一跳就是每条心跳都要过一遍内网。
+		h.answerHeartbeat(connID, env, body.Heartbeat)
+
+	case *pb.ClientUplink_Logout, *pb.ClientUplink_Ack:
 		// 其余框架消息：原样交给逻辑层（gate 不解释）
 		h.sendToLogic(connID, "gate.clientUplink", env.GetMsgType(), env.GetCallbackId(), env.GetBody())
 		h.stats.forwardedUp.Add(1)
@@ -105,6 +116,21 @@ func (h *Hub) OnClient(connID string, env *pb.Envelope, up *pb.ClientUplink) {
 	default:
 		h.badEnvelope()
 	}
+}
+
+// answerHeartbeat 回应心跳：client_time_ms 原样回传，server_time_ms 是本 gate 的单调毫秒。
+// 请求是 REQUEST 就回 RESPONSE（原 callback_id），否则按 NOTIFY 发（method 回显原值）。
+func (h *Hub) answerHeartbeat(connID string, env *pb.Envelope, req *pb.HeartBeat) {
+	down := &pb.ClientDownlink{Body: &pb.ClientDownlink_Heartbeat{Heartbeat: &pb.HeartBeatResult{
+		ClientTimeMs: req.GetClientTimeMs(),
+		ServerTimeMs: uint64(h.now()),
+	}}}
+	if env.GetMsgType() == pb.MsgType_MSG_REQUEST && env.GetCallbackId() != 0 {
+		h.deliverDown(connID, env.GetMethod(), down,
+			withMsgType(pb.MsgType_MSG_RESPONSE), withCallback(env.GetCallbackId()))
+		return
+	}
+	h.deliverDown(connID, env.GetMethod(), down)
 }
 
 // forwardCall 处理 CallEntity：要回包的走 ClientRequestHub，否则走 ClientNotifyHub。
@@ -140,12 +166,31 @@ func (h *Hub) forwardCall(connID string, env *pb.Envelope, call *pb.CallEntity) 
 // 未登录（无会话）则任选一个（登录请求任何节点都能处理，处理完由逻辑层下发
 // HubCreatePlayerEntity 把会话绑到那个节点）。
 func (h *Hub) sendToLogic(connID, method string, msgType pb.MsgType, callbackID uint32, body []byte) {
+	var nodeID string
+	if connID != "" {
+		if s, ok := h.sess.ByConn(connID); ok {
+			nodeID = s.NodeID // 实体在哪个节点就发哪
+		}
+	}
+	h.sendToNode(nodeID, method, msgType, callbackID, body)
+}
+
+// sendToNode 发给指定节点；nodeID 为空或那个节点已经没了时**任取一个**。
+//
+// 后者是"未登录请求任何节点都能处理"的兜底（登录处理完由逻辑层下发
+// HubCreatePlayerEntity 把会话绑到那个节点）。但**已知会话的断开通知不能走兜底**——
+// 那会把旧实体的退役消息投给一个根本不知道它的节点，所以 RemoveClient 用旧会话的 NodeID
+// 直发这里，而不是再按 conn 查一次。
+func (h *Hub) sendToNode(nodeID, method string, msgType pb.MsgType, callbackID uint32, body []byte) {
+	h.sendEnvelopeToNode(nodeID, &pb.Envelope{MsgType: msgType, Method: method, CallbackId: callbackID, Body: body})
+}
+
+// sendEnvelopeToNode 是 sendToNode 的原样版本：需要带 `status` 的回包（会话目录占位）走它。
+func (h *Hub) sendEnvelopeToNode(nodeID string, env *pb.Envelope) {
 	h.mu.RLock()
 	var peer Peer
-	if connID != "" {
-		if s, ok := h.sess.ByConn(connID); ok && s.NodeID != "" {
-			peer = h.logics[s.NodeID]
-		}
+	if nodeID != "" {
+		peer = h.logics[nodeID]
 	}
 	if peer == nil {
 		for _, p := range h.logics { // 未登录或节点不在了：任取一个
@@ -157,5 +202,5 @@ func (h *Hub) sendToLogic(connID, method string, msgType pb.MsgType, callbackID 
 	if peer == nil {
 		return // 没有逻辑节点：丢弃（调用方超时）
 	}
-	_ = peer.Send(&pb.Envelope{MsgType: msgType, Method: method, CallbackId: callbackID, Body: body})
+	_ = peer.Send(env)
 }

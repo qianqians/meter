@@ -9,9 +9,11 @@
 > 结论都给了文件位置，可逐条复核。**abelkhan 侧只看能力有无，不评价其质量**——它的已知质量问题
 > 单列在 §5，免得把"它做错了"误读成"我们不用做"。
 >
-> **已落地**：§4 的 P0-1（每实体串行队列 + `fence()`）已实现，代码与契约见
-> [`../core/SPEC.md`](../core/SPEC.md)「执行模型」。下面描述 meter 现状的句子按快照读，
-> 该项以 core 模块为准。
+> **已落地**：§4 的 P0-1（每实体串行队列 + `fence()`，见 [`../core/SPEC.md`](../core/SPEC.md)
+> 「执行模型」）、P0-2（`NotifyConnID` / `LoginResult` / 心跳回包 / 空帧 pong，见
+> [`../gate/SPEC.md`](../gate/SPEC.md) 的不变量）、P0-3（同节点复用旧实体、跨 gate 会话目录与跨节点
+> 退役，见 [`../core/SPEC.md`](../core/SPEC.md)「会话与顶号」）。下面描述 meter 现状的句子按快照读，
+> 这三项以模块 SPEC 为准。
 
 ---
 
@@ -51,7 +53,7 @@ abelkhan 整齐**，这五项不用补，补了是倒退。
 | 9 | 调用语义 | `WRpc` + 委托字典；**无超时清理**，`err_msg` 是字符串 | 三函数 + `callback_id` 配对 + `TIMEOUT`/`NOT_FOUND`/`UNKNOWN` + 错误码 | ⭐ meter |
 | 10 | **可靠投递 + ack** | hub 赋 `seq` → Redis list → gate 队头比对 + 64 桶串行 ack + 10s 超时重投 | 无（协议有 `AckReliable`，无 `HubNotifyClientMq`、无 seq、无重投） | ❌ |
 | 11 | **跨节点通道** | `hub_hub_{hubId}_mq`（Redis list）+ `HubHubNotifyEntity`，能跑 | `CrossCallNotify` 一条消息，**无实现、无传输、无所有权表** | ❌ |
-| 12 | **顶号** | 复用/新建 → Redis Lua `session:{user}` 占位 → 同 hub 踢 / 跨 hub `HubSessionReplaced` → 旧实体 Save + 摘除 | gate 层 `Bind` 挤掉旧连接 + `KickOff{DUPLICATE_LOGIN}`；逻辑层覆盖 `entities` 表，旧实体不退役 | 🟡→❌ 有入口无收尾 |
+| 12 | **顶号** | 复用/新建 → Redis Lua `session:{user}` 占位 → 同 hub 踢 / 跨 hub `HubSessionReplaced` → 旧实体 Save + 摘除 | 同节点：`rebind` 复用旧对象；跨节点：`hub.claimUser` 占位 + `HubSessionReplaced` 让旧节点退役；gate 把挤出的会话投对节点并带错误码 4 | ✅（状态不搬运） |
 | 13 | 断线重连 | 客户端 SDK 完整（退避重连 + 重同步 + 未认领删除）；服务端只换 `Client`，不重发实体 | `GateForwardClientRequestReconnect` 已转发，逻辑层**计数后丢弃** | ❌ |
 | 14 | **迁移** | 六阶段：切割(fence)→落地(Save)→重建(Load+replay)→转尾→墓碑静默→gate re-point；失败回滚 | 协议里明确删掉 `TransferPrepare/Commit`（改为"落库→按 key 重新加载"），代码 0 行 | ❌ |
 | 15 | 持久化 | `MongoProxy` + `Player.Save()`（但恒成功、从未被调用） | 定稿 PostgreSQL，**没有存储模块** | ❌ |
@@ -94,6 +96,9 @@ meter：`core/src/server.ts` 的 `dispatch()` 在 `transport.onData` 回调里�
 
 > **已落地**（`core/src/actor.ts` + `Entity` 接入）：四条断言 + `fence` / `close` 语义都有测试；
 > 契约写在 [`../core/SPEC.md`](../core/SPEC.md)「执行模型」。
+>
+> 顶号的收尾见 `core/SPEC.md`「会话与顶号」：同节点复用旧实体（内存状态不丢），跨节点走
+> "会话目录占位 + 通知旧节点退役"。**状态不跟着搬**——存储模块仍是最大的那块缺口。
 
 ### 2.2 顶号：meter 现在只做了"挤"，没做"收"
 
@@ -210,7 +215,7 @@ meter：定稿 PostgreSQL + "存储访问下沉为 hub 内的一个模块，不�
 
 | # | 件 | 位置 | 说明 |
 |---|---|---|---|
-| 1 | **登录回包** | `gate/internal/hub/client.go` + `core/src/server.ts` | `NotifyConnID`（连上就发）、`LoginResult`（登录成功）、`ReconnectResult`、`HeartBeatResult` —— 现在**一条都没发**，`Login` 这条 REQUEST 的 `callback_id` 永远等不到 RESPONSE。`resume_token` 没有它，重连无从谈起 |
+| 1 | **登录回包** ~~`gate/internal/hub/client.go` + `core/src/server.ts`~~ **已完成** | `gate/internal/hub` | `NotifyConnID`（连上就发）、`LoginResult`（由 gate 在 `hub.createPlayerEntity` 时回）、`HeartBeatResult`、空帧 pong。`ReconnectResult` 仍不做（留给重连）；`resume_token` 目前留空 |
 | 2 | **会话目录** | 新模块（gate 或逻辑层，Redis） | `user:{id} → {node, entity, conn, seq}`，TTL + 续期 + 带 seq 的 CAS。**这是这条路线唯一的"新增基础设施"**：请求落在哪个节点，必须有人回答"现在归谁" |
 | 3 | **挤出的会话要喂回去** | `gate/internal/session/table.go` `Bind` 已有返回值 | `hub.go` 的 `kick` 路径拿它发 `ClientDisconnect{user_id, entity_id, KICKED}`；现在 `RemoveClient` 走 `Unbind`（已被删，返回 nil）导致消息是空的 |
 | 4 | **逻辑层 userId 索引 + 退役钩子** | `core/src/server.ts` | `userId → entity`、`onPlayerRetire(player, reason)`（save/destroy/detach）、同 entityId 重复登录时先退役旧的 |
@@ -234,8 +239,9 @@ meter：定稿 PostgreSQL + "存储访问下沉为 hub 内的一个模块，不�
 **P0 — 让框架的两条不变量成立（约 1k 行）**
 
 1. ~~`Actor`：每实体串行队列 + fence 原语（§2.1）~~ **已完成**——它的 fence 是后面顶号/迁移的依赖。
-2. 登录回包三件：`NotifyConnID` / `LoginResult` / `ReconnectResult`（+ `HeartBeatResult`）。
-3. 顶号收尾：挤出的会话喂 `ClientDisconnect`、逻辑层 `userId → entity` 索引与退役钩子。
+2. ~~登录回包：`NotifyConnID` / `LoginResult` / `HeartBeatResult`~~ **已完成**（`ReconnectResult` 随重连一起做）。
+3. ~~顶号收尾：挤出的会话喂 `ClientDisconnect`、逻辑层 `userId → entity` 索引与退役钩子~~ **已完成**
+   （含跨 gate：会话目录 + 节点总线）。
 
 **P1 — 持久化与会话归属（约 1.2k 行）**
 4. `Storage` 接口 + PG 实现 + 存盘生命周期（登录/定时/下线/被顶/迁移前）。

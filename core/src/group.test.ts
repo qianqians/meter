@@ -9,9 +9,10 @@ import { Group } from './group';
 
 function setup() {
   const sent: Uint8Array[] = [];
-  const down: Downlink = { send: (b) => sent.push(b) };
+  const down: Downlink = { send: (_gate, b) => sent.push(b) };
   const last = () => fromBinary(EnvelopeSchema, sent[sent.length - 1]);
-  const mkPlayer = (id: string) => new Entity(id, 'player', down, { connId: `conn-${id}` });
+  const mkPlayer = (id: string, gateName = 'g1') =>
+    new Entity(id, 'player', down, { connId: `conn-${id}`, gateName });
   const mkMonster = (id: string) => new Entity(id, 'monster', down);
   const view = (e: Entity) => new Uint8Array([e.id.length]);
   return { sent, down, last, mkPlayer, mkMonster, view };
@@ -112,11 +113,28 @@ describe('rpcNotify：组广播', () => {
     expect(g.stats.broadcasts).toBe(1);
   });
 
-  it('空组广播：conn 名单为空（gate 侧丢弃）', () => {
-    const { down, last, view } = setup();
+  it('空组广播：不产生任何下行（没人可发，不必让 gate 丢一个空名单）', () => {
+    const { down, view, sent } = setup();
     const g = new Group('g1', down, view);
     g.rpcNotify('scene.chat', new Uint8Array());
-    const body = fromBinary(GateForwardHubCallGroupSchema, last().body);
-    expect(body.connId).toEqual([]);
+    expect(sent.length).toBe(0);
+  });
+
+  it('组内玩家分散在多台 gate：按 gate 分组各发一条', () => {
+    const { down, view, sent, mkPlayer } = setup();
+    const g = new Group('g1', down, view);
+    g.join(mkPlayer('p1', 'g1'));
+    g.join(mkPlayer('p2', 'g2'));
+    sent.length = 0; // join 的视图同步也算下行，这里只看广播
+
+    g.rpcNotify('scene.chat', new Uint8Array([7]));
+
+    expect(sent.length).toBe(2);
+    const conns: string[][] = [];
+    for (const b of sent) {
+      const down = fromBinary(EnvelopeSchema, b);
+      conns.push(fromBinary(GateForwardHubCallGroupSchema, down.body).connId);
+    }
+    expect(conns).toEqual([['conn-p1'], ['conn-p2']]);
   });
 });

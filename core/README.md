@@ -14,7 +14,7 @@
 cd schema && ./check.sh    # 先出 codegen（生成到 core/src/gen/，已 gitignore）
 cd ../core
 npm install                # 首次
-npm test                   # vitest：63 条
+npm test                   # vitest：73 条
 npm run typecheck          # tsc --noEmit
 npm run e2e                # 全链路：先 cd ../gate && go build -o ../core/scripts/gate-e2e.exe ./cmd/gate
 ```
@@ -67,13 +67,19 @@ rpc.register('entity.attack', AttackRequestSchema, AttackResultSchema,
 import { connectGate } from './src/gatelink';
 import { createLogicServer } from './src/server';
 
-const transport = await connectGate({ host: '127.0.0.1', port: 9002, nodeId: 'logic-a' });
+// 一台 gate 一条链路；名字来自 gate 的握手回包（logic.hello.ack）
+const gateLink = await connectGate({ host: '127.0.0.1', port: 9002, nodeId: 'logic-a' });
 const server = createLogicServer({
-  transport, nodeId: 'logic-a',
-  onLogin: (login, connId) => ({
+  gates: [gateLink], nodeId: 'logic-a',
+  // 跨节点顶号需要节点总线（NATS hub_{nodeId}_mq）；单节点部署可以不给
+  // bus: createBus(mq),
+  onLogin: (login, { connId }) => ({
     ok: true, userId: login.token, entityId: `e-${connId}`,
     entityType: 'player', content: toBinary(PlayerInfoSchema, info),
   }),
+  onPlayerDestroy: (player, reason) => {
+    // reason: 'disconnect'（掉线）| 'replaced'（被顶号）
+  },
   onPlayerCreate: (player) => {
     // 客户端 → 实体：与 rpc.register 同形状
     player.register('entity.attack', AtkReqSchema, AtkRspSchema,
@@ -100,17 +106,27 @@ server.global.rpcNotify('server.notice', toBinary(NoticeSchema, n));
 
 // 切割点：这一刻已入队的调用全部跑完后 resolve（顶号/迁移用；不要在 handler 里 fence 自己）
 await player.fence();
+
+// 顶号：把实体重新绑到新连接（同一个对象，内存状态不丢；旧连接的在途请求被 reject）
+player.rebind(newConnId, gateName);
 ```
 
 **上行分派表**（gate → 逻辑服，server.ts 内部）：
 `gate.clientLogin` → onLogin 决策 → `hub.createPlayerEntity` / `hub.kickOffClient`；
 `gate.clientRequest`（REQUEST/NOTIFY 按 msgType 区分）→ 按 entity_id 分派；
 `gate.clientResponse` → 配对实体的在途 `rpcRequest`；
-`gate.clientDisconnect` → 销毁实体 + 退组。
+`gate.clientDisconnect` → 销毁实体 + 退组；
+`gate.clientUplink` → 只认 logout / ack（心跳由 gate 直接答，登录回包也由 gate 发）；
+`hub.claimUser` → gate 回 `gate.ownerInfo`（会话目录占位，登录路径上先做这一步）。
+
+**顶号**：同 `userId` + 同 `entityId` → `rebind` 复用旧对象；换了实体 id 或被别的账号占着 → 旧的以
+`replaced` 退役再建。旧主人在别的节点时，经 `hub_{node}_mq` 发 `HubSessionReplaced` 让它退役
+（`seq` 比本地小就丢弃）。见 [`SPEC.md`](SPEC.md)「会话与顶号」。
 
 **协议映射**：`entity.rpcRequest`→`gate.forwardHubCallClient{REQUEST}`，
 回包→`{RESPONSE, 原 callback_id}`（gate 侧透传）；`group.rpcNotify`→`gate.forwardHubCallGroup`；
 `global.rpcNotify`→`gate.forwardHubCallGlobal`。零新增 proto。
 
-已知缺口（P0 推迟）：clientUplink 透传不带 conn_id（logout 只给 reason）；断线重连
-（gate.clientReconnect）未处理；跨服 entity 调用（NATS entity_{id}_logic_mq）留待实体所有权表。
+已知缺口：clientUplink 透传不带 conn_id（logout 只给 reason）；断线重连（gate.clientReconnect）未处理；
+跨服 entity 调用（NATS entity_{id}_logic_mq）留待实体所有权表；持久化（所以跨节点顶号只能"退役 + 重建"，
+内存状态不跟着走）。

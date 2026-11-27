@@ -3,11 +3,13 @@
 //   客户端(ws) ──WS──► gate(Go) ──TCP──► 逻辑服(TS, 本脚本)
 //
 // 验收清单：
-//   ① Login → hub.createPlayerEntity → 客户端收到 create_player（登录闭环）
-//   ② 客户端 callEntity('entity.attack') REQUEST → 逻辑分派 → RESPONSE 原样回包（依赖 gate 的透传补丁）
-//   ③ 逻辑服 entity.rpcRequest('entity.query') → 客户端回包 → 配对 resolve（服务端调客户端闭环）
-//   ④ group.rpcNotify('scene.chat') → 客户端收到 NOTIFY
-//   ⑤ global.rpcNotify('server.notice') → 客户端收到 NOTIFY
+//   ① 连上就收到 NotifyConnID（conn_id / proto_ver / 心跳间隔 / 帧上限）
+//   ② Login → hub.createPlayerEntity（create_player）+ 登录 RESPONSE（LoginResult，原 callback_id）
+//   ③ 客户端 callEntity('entity.attack') REQUEST → 逻辑分派 → RESPONSE 原样回包（依赖 gate 的透传补丁）
+//   ④ 逻辑服 entity.rpcRequest('entity.query') → 客户端回包 → 配对 resolve（服务端调客户端闭环）
+//   ⑤ group.rpcNotify('scene.chat') → 客户端收到 NOTIFY
+//   ⑥ global.rpcNotify('server.notice') → 客户端收到 NOTIFY
+//   ⑦ 心跳：HeartBeat → HeartBeatResult；空帧 ping → 空帧 pong
 //
 // 跑法（在仓库根）：
 //   cd gate && go build -o ../core/scripts/gate-e2e.exe ./cmd/gate
@@ -25,7 +27,7 @@ import WebSocket from 'ws';
 import { create, fromBinary, toBinary } from '@bufbuild/protobuf';
 
 import { EnvelopeSchema, MsgType } from '../src/gen/envelope_pb';
-import { ClientUplinkSchema, LoginSchema } from '../src/gen/gate_pb';
+import { ClientUplinkSchema, HeartBeatSchema, LoginSchema } from '../src/gen/gate_pb';
 import { CallEntitySchema } from '../src/gen/common_pb';
 import { ClientDownlinkSchema } from '../src/gen/client_pb';
 import { RefreshEntitySchema } from '../src/gen/client_pb';
@@ -70,10 +72,15 @@ function uplinkCall(entityId: string, content: Uint8Array): Uint8Array {
   }));
 }
 
+type Env = ReturnType<typeof fromBinary<typeof EnvelopeSchema>>;
+type Down = ReturnType<typeof fromBinary<typeof ClientDownlinkSchema>>;
+
 class WsClient {
   private readonly ws: WebSocket;
   private buf = new Uint8Array(0);
-  private readonly inbox: { env: ReturnType<typeof fromBinary<typeof EnvelopeSchema>>; down: ReturnType<typeof fromBinary<typeof ClientDownlinkSchema>> }[] = [];
+  /** 收到的空帧（pong）数：len==0 的帧不是 Envelope，解析不了。 */
+  pongs = 0;
+  private readonly inbox: { env: Env; down: Down }[] = [];
 
   constructor() {
     this.ws = new WebSocket(`ws://127.0.0.1:${CLIENT_PORT}/ws`);
@@ -83,6 +90,7 @@ class WsClient {
       const merged = new Uint8Array(this.buf.length + chunk.length);
       merged.set(this.buf); merged.set(chunk, this.buf.length);
       const consumed = decodeFrames(merged, (f: Frame) => {
+        if (f.payload.length === 0) { this.pongs++; return; }
         const env = fromBinary(EnvelopeSchema, f.payload);
         this.inbox.push({ env, down: fromBinary(ClientDownlinkSchema, env.body) });
       });
@@ -104,13 +112,27 @@ class WsClient {
     }));
   }
 
-  /** 等一条满足条件的下行（method 匹配 + msgType 匹配）。 */
-  async recv(method: string, msgType: MsgType, timeoutMs = 5000) {
+  /** 等一条满足条件的下行（method + msgType，可选再按 body 的 oneof 成员筛）。 */
+  async recv(method: string, msgType: MsgType, timeoutMs = 5000, match?: (down: Down) => boolean) {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
-      const i = this.inbox.findIndex(({ env }) => env.method === method && env.msgType === msgType);
+      const i = this.inbox.findIndex(({ env, down }) =>
+        env.method === method && env.msgType === msgType && (!match || match(down)));
       if (i >= 0) return this.inbox.splice(i, 1)[0];
       if (Date.now() > deadline) fail(`等 ${method}(${msgType}) 超时`);
+      await sleep(20);
+    }
+  }
+
+  /** len==0 的帧 = 保活帧（协议里的最省 ping）。 */
+  ping(): void {
+    this.ws.send(encodeFrame({ flags: 0, ts: Date.now() & 0xffffffff, payload: new Uint8Array(0) }));
+  }
+
+  async waitPong(timeoutMs = 3000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (this.pongs === 0) {
+      if (Date.now() > deadline) fail('等 pong 超时');
       await sleep(20);
     }
   }
@@ -130,13 +152,14 @@ async function main() {
     await waitPort(CLIENT_PORT);
     log(`gate 起来了（logic :${LOGIC_PORT} / client :${CLIENT_PORT}）`);
 
-    // ② 逻辑服连 gate（logic.hello 握手）
-    const transport = await connectGate({ host: '127.0.0.1', port: LOGIC_PORT, nodeId: 'n-e2e-logic' });
+    // ② 逻辑服连 gate（logic.hello → logic.hello.ack，拿到 gate 名字）
+    const gateLink = await connectGate({ host: '127.0.0.1', port: LOGIC_PORT, nodeId: 'n-e2e-logic' });
+    log(`逻辑服已连上 gate：${gateLink.name}`);
 
     let player: Entity | undefined;
     let serverRsp: { entityId: string } | undefined;
     const server = createLogicServer({
-      transport,
+      gates: [gateLink],
       nodeId: 'n-e2e-logic',
       onLogin: (login) => {
         if (!login.token) return { ok: false, code: 4, detail: 'no token' };
@@ -154,16 +177,34 @@ async function main() {
     await client.opened;
     log('客户端 WS 已连');
 
+    // ① 连上第一条必须是 NotifyConnID
+    const hello = await client.recv('', MsgType.MSG_NOTIFY, 5000, (d) => d.body?.case === 'connId');
+    const hb = hello.down.body?.case === 'connId' ? hello.down.body.value : fail('下行不是 NotifyConnID');
+    if (!hb.connId) fail('NotifyConnID 没有 conn_id');
+    if (hb.protoVer === 0) fail('NotifyConnID 没有 proto_ver');
+    if (hb.heartbeatMs === 0) fail('NotifyConnID 没有 heartbeat_ms');
+    if (hb.maxFrameBytes === 0) fail('NotifyConnID 没有 max_frame_bytes');
+    log(`① NotifyConnID ✅  conn=${hb.connId} proto_ver=${hb.protoVer} heartbeat=${hb.heartbeatMs}ms frame≤${hb.maxFrameBytes}B`);
+
     const loginBody = toBinary(ClientUplinkSchema, create(ClientUplinkSchema, {
       body: { case: 'login', value: create(LoginSchema, { token: 'e2e-token', serverId: 's1' }) },
     }));
     client.send(MsgType.MSG_REQUEST, 'client.login', 1, loginBody);
 
-    const created = await client.recv('', MsgType.MSG_NOTIFY); // create_player 的 method 为空
+    const created = await client.recv('', MsgType.MSG_NOTIFY, 5000, (d) => d.body?.case === 'createPlayer');
     const cp = created.down.body?.case === 'createPlayer' ? created.down.body.value : undefined;
     if (cp?.entityId !== ENTITY_ID) fail(`create_player 的实体不对: ${cp?.entityId}`);
     if (server.entityOf(ENTITY_ID) !== player) fail('逻辑服没建玩家实体');
-    log(`① 登录闭环 ✅  entity=${ENTITY_ID}`);
+
+    // 登录是 REQUEST：必须收到原 callback_id 的 RESPONSE，body 是 LoginResult
+    const loginRsp = await client.recv('client.login', MsgType.MSG_RESPONSE);
+    if (loginRsp.env.status !== 0) fail(`登录回包 status=${loginRsp.env.status}`);
+    if (loginRsp.env.callbackId !== 1) fail(`登录回包 callback_id 不对: ${loginRsp.env.callbackId}`);
+    const lr = loginRsp.down.body?.case === 'login' ? loginRsp.down.body.value : fail('登录回包不是 LoginResult');
+    if (lr.userId !== 'u-e2e' || lr.entityId !== ENTITY_ID) {
+      fail(`LoginResult 字段不对: user=${lr.userId} entity=${lr.entityId}`);
+    }
+    log(`② 登录闭环 ✅  LoginResult{u=${lr.userId}, e=${lr.entityId}, token=${lr.resumeToken.length}B}`);
 
     // ④ 客户端 callEntity：REQUEST → 逻辑 → RESPONSE（走 gate 的透传补丁）
     const atkReq = create(RefreshEntitySchema, { entityId: 'm1', entityType: 'monster', reason: 2 });
@@ -173,7 +214,7 @@ async function main() {
     const rspCall = rsp.down.body?.case === 'call' ? rsp.down.body.value : undefined;
     const rspBody = fromBinary(RefreshEntitySchema, rspCall?.content ?? new Uint8Array());
     if (rspBody.entityId !== 'hit-m1') fail(`回包内容不对: ${rspBody.entityId}`);
-    log(`② callEntity 闭环 ✅  attack(m1) → hit-m1（callback ${rsp.env.callbackId}）`);
+    log(`③ callEntity 闭环 ✅  attack(m1) → hit-m1（callback ${rsp.env.callbackId}）`);
 
     // ⑤ 服务端调客户端：entity.rpcRequest → 客户端回包 → 配对 resolve
     //    客户端在收到 query REQUEST 时应答
@@ -186,7 +227,7 @@ async function main() {
     const queried = await player!.rpcRequest('entity.query', new Uint8Array(0), RefreshEntitySchema);
     serverRsp = { entityId: queried.entityId };
     if (queried.entityId !== 'client-side') fail(`rpcRequest 回包不对: ${queried.entityId}`);
-    log(`③ entity.rpcRequest 闭环 ✅  query → ${queried.entityId}`);
+    log(`④ entity.rpcRequest 闭环 ✅  query → ${queried.entityId}`);
 
     // ⑥ 组广播
     const group = server.createGroup('scene-e2e');
@@ -194,12 +235,28 @@ async function main() {
     group.rpcNotify('scene.chat', toBinary(RefreshEntitySchema, create(RefreshEntitySchema, { entityId: 'scene' })), { from: ENTITY_ID });
     const g = await client.recv('scene.chat', MsgType.MSG_NOTIFY);
     if (g.down.body?.case !== 'call') fail('组广播应走 ClientDownlink.call');
-    log('④ group.rpcNotify ✅');
+    log('⑤ group.rpcNotify ✅');
 
     // ⑦ 全服广播
     server.global.rpcNotify('server.notice', new Uint8Array([1, 2]), ENTITY_ID);
     await client.recv('server.notice', MsgType.MSG_NOTIFY);
-    log('⑤ global.rpcNotify ✅');
+    log('⑥ global.rpcNotify ✅');
+
+    // ⑦ 心跳：HeartBeat → HeartBeatResult（gate 直接答，不过逻辑层）
+    const hbReq = toBinary(ClientUplinkSchema, create(ClientUplinkSchema, {
+      body: { case: 'heartbeat', value: create(HeartBeatSchema, { clientTimeMs: 1234n }) },
+    }));
+    client.send(MsgType.MSG_REQUEST, 'client.heartbeat', 11, hbReq);
+    const hbRsp = await client.recv('client.heartbeat', MsgType.MSG_RESPONSE);
+    if (hbRsp.env.callbackId !== 11) fail(`心跳回包 callback 不对: ${hbRsp.env.callbackId}`);
+    const hbRes = hbRsp.down.body?.case === 'heartbeat' ? hbRsp.down.body.value : fail('心跳回包不是 HeartBeatResult');
+    if (hbRes.clientTimeMs !== 1234n) fail(`client_time_ms 应原样回传: ${hbRes.clientTimeMs}`);
+    log(`⑦ 心跳回包 ✅  server_time=${hbRes.serverTimeMs}ms`);
+
+    // ⑦b 空帧 ping → 空帧 pong
+    client.ping();
+    await client.waitPong();
+    log('⑦b 空帧 pong ✅');
 
     void serverRsp;
     console.log('\ne2e 全链路通过 ✅');

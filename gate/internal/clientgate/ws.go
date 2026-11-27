@@ -65,6 +65,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	connID := "c-" + strconv.FormatUint(s.connSeq.Add(1), 10)
 	peer := &wsPeer{c: c, now: s.now}
 	s.hub.AddClient(connID, peer)
+	s.hub.OnConnected(connID) // 协议规定的第一条消息：NotifyConnID
 	defer s.hub.RemoveClient(connID)
 	log.Printf("[%s] WS 接入 %s", connID, r.RemoteAddr)
 

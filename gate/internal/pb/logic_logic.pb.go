@@ -52,6 +52,87 @@ const (
 //	· `src_hub` 让收方能回发通知、也能做环路检测（A→B→A 的链要能断）；
 //	· 目标实体属于业务语义（"让 1001 号玩家处理这件事"），放在 `content` 里由业务解，
 //	  框架不替业务决定路由粒度。
+//
+// 顶号通知（hub → hub，走 NATS `hub_{nodeId}_mq`）：这个账号已经在别处登录了。
+//
+// 收方是**旧节点**：它用自己的那条 gate 链路踢掉旧连接，然后让旧实体退役（`replaced`）。
+// 带 `seq` 是为了让迟到的通知被忽略——只有比本地新才执行。
+type HubSessionReplaced struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	UserId        string                 `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	EntityId      string                 `protobuf:"bytes,2,opt,name=entity_id,json=entityId,proto3" json:"entity_id,omitempty"`
+	GateName      string                 `protobuf:"bytes,3,opt,name=gate_name,json=gateName,proto3" json:"gate_name,omitempty"` // 旧会话所在的 gate（收方据此选链路）
+	ConnId        string                 `protobuf:"bytes,4,opt,name=conn_id,json=connId,proto3" json:"conn_id,omitempty"`       // 旧连接
+	Seq           uint64                 `protobuf:"varint,5,opt,name=seq,proto3" json:"seq,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *HubSessionReplaced) Reset() {
+	*x = HubSessionReplaced{}
+	mi := &file_logic_logic_proto_msgTypes[0]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HubSessionReplaced) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HubSessionReplaced) ProtoMessage() {}
+
+func (x *HubSessionReplaced) ProtoReflect() protoreflect.Message {
+	mi := &file_logic_logic_proto_msgTypes[0]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HubSessionReplaced.ProtoReflect.Descriptor instead.
+func (*HubSessionReplaced) Descriptor() ([]byte, []int) {
+	return file_logic_logic_proto_rawDescGZIP(), []int{0}
+}
+
+func (x *HubSessionReplaced) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *HubSessionReplaced) GetEntityId() string {
+	if x != nil {
+		return x.EntityId
+	}
+	return ""
+}
+
+func (x *HubSessionReplaced) GetGateName() string {
+	if x != nil {
+		return x.GateName
+	}
+	return ""
+}
+
+func (x *HubSessionReplaced) GetConnId() string {
+	if x != nil {
+		return x.ConnId
+	}
+	return ""
+}
+
+func (x *HubSessionReplaced) GetSeq() uint64 {
+	if x != nil {
+		return x.Seq
+	}
+	return 0
+}
+
 type CrossCallNotify struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	SrcHub        string                 `protobuf:"bytes,1,opt,name=src_hub,json=srcHub,proto3" json:"src_hub,omitempty"` // 发起方 hub 的标识（回发与环路检测用）
@@ -64,7 +145,7 @@ type CrossCallNotify struct {
 
 func (x *CrossCallNotify) Reset() {
 	*x = CrossCallNotify{}
-	mi := &file_logic_logic_proto_msgTypes[0]
+	mi := &file_logic_logic_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -76,7 +157,7 @@ func (x *CrossCallNotify) String() string {
 func (*CrossCallNotify) ProtoMessage() {}
 
 func (x *CrossCallNotify) ProtoReflect() protoreflect.Message {
-	mi := &file_logic_logic_proto_msgTypes[0]
+	mi := &file_logic_logic_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -89,7 +170,7 @@ func (x *CrossCallNotify) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CrossCallNotify.ProtoReflect.Descriptor instead.
 func (*CrossCallNotify) Descriptor() ([]byte, []int) {
-	return file_logic_logic_proto_rawDescGZIP(), []int{0}
+	return file_logic_logic_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *CrossCallNotify) GetSrcHub() string {
@@ -124,7 +205,13 @@ var File_logic_logic_proto protoreflect.FileDescriptor
 
 const file_logic_logic_proto_rawDesc = "" +
 	"\n" +
-	"\x11logic_logic.proto\x12\x02fw\"w\n" +
+	"\x11logic_logic.proto\x12\x02fw\"\x92\x01\n" +
+	"\x12HubSessionReplaced\x12\x17\n" +
+	"\auser_id\x18\x01 \x01(\tR\x06userId\x12\x1b\n" +
+	"\tentity_id\x18\x02 \x01(\tR\bentityId\x12\x1b\n" +
+	"\tgate_name\x18\x03 \x01(\tR\bgateName\x12\x17\n" +
+	"\aconn_id\x18\x04 \x01(\tR\x06connId\x12\x10\n" +
+	"\x03seq\x18\x05 \x01(\x04R\x03seq\"w\n" +
 	"\x0fCrossCallNotify\x12\x17\n" +
 	"\asrc_hub\x18\x01 \x01(\tR\x06srcHub\x12\x16\n" +
 	"\x06method\x18\x02 \x01(\tR\x06method\x12\x18\n" +
@@ -143,9 +230,10 @@ func file_logic_logic_proto_rawDescGZIP() []byte {
 	return file_logic_logic_proto_rawDescData
 }
 
-var file_logic_logic_proto_msgTypes = make([]protoimpl.MessageInfo, 1)
+var file_logic_logic_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
 var file_logic_logic_proto_goTypes = []any{
-	(*CrossCallNotify)(nil), // 0: fw.CrossCallNotify
+	(*HubSessionReplaced)(nil), // 0: fw.HubSessionReplaced
+	(*CrossCallNotify)(nil),    // 1: fw.CrossCallNotify
 }
 var file_logic_logic_proto_depIdxs = []int32{
 	0, // [0:0] is the sub-list for method output_type
@@ -166,7 +254,7 @@ func file_logic_logic_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_logic_logic_proto_rawDesc), len(file_logic_logic_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   1,
+			NumMessages:   2,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

@@ -7,8 +7,8 @@
   3. 断言 gate 把它包成 `ClientRequestHub{conn_id, entity_id, content}` 转给了逻辑节点
   4. 逻辑节点回一条 `GateForwardHubCallClient`，断言客户端收到 `CallEntity`
 
-用法：
-    cd gate && go run ./cmd/gate -client :19001 -logic :19002 &
+用法（端口来自配置文件；脚本自己从 NotifyConnID 里取 conn_id，可以重复跑）：
+    cd gate && go run ./cmd/gate -config /tmp/smoke.json &   # {"listen":{"logic_port":19002,"client_port":19001}}
     python3 scripts/smoke.py 127.0.0.1 19001 19002
 """
 import base64
@@ -222,9 +222,26 @@ class WSClient:
 
 def main():
     ok = True
+    conn_id = "c-1"   # 下面从 NotifyConnID 里覆盖成真实值
     logic = LogicLink("n-smoke")
     ws = WSClient()
     print("① 两个端口都连上了（TCP 逻辑链路 + WebSocket 客户端）")
+
+    # --- 连上第一条必须是 NotifyConnID（ClientDownlink.conn_id = 1） ---
+    got = ws.recv(2)
+    if got is None:
+        print("①b 没收到 NotifyConnID —— 失败")
+        ok = False
+    else:
+        f = pb_fields(decode_frame(got)[0])
+        hello = pb_fields(pb_fields(f[4][0])[1][0])
+        conn_id = hello[1][0].decode()
+        print("①b 收到 NotifyConnID:", {"conn_id": conn_id,
+                                       "proto_ver": hello.get(3, [0])[0],
+                                       "heartbeat_ms": hello.get(5, [0])[0]})
+        if not conn_id:
+            print("   conn_id 为空 —— 失败")
+            ok = False
 
     # --- 未登录连接的上行应被丢弃（会话由逻辑层的 HubCreatePlayerEntity 建立） ---
     ws.send(encode_frame(envelope(1, "entity.attack", 7, uplink_call("e-nobody", b""))))
@@ -236,7 +253,7 @@ def main():
 
     # --- 逻辑层建会话：gate 建立 conn ⇄ entity，并给客户端推 ClientDownlink.create_player ---
     logic.send(envelope(3, "hub.createPlayerEntity", 0,
-                        pb_str(1, "c-1") + pb_str(2, "u-smoke") + pb_str(3, "e-smoke") + pb_str(4, "player")))
+                        pb_str(1, conn_id) + pb_str(2, "u-smoke") + pb_str(3, "e-smoke") + pb_str(4, "player")))
     got = ws.recv(2)
     if got is None:
         print("③ 客户端没收到建实体推送 —— 失败")
@@ -261,7 +278,7 @@ def main():
 
     # --- 逻辑层调客户端：gate 译成 ClientDownlink.call，method 用业务方法名 ---
     logic.send(envelope(1, "gate.forwardHubCallClient", 11,
-                        pb_str(1, "c-1") + pb_str(2, "e-smoke") + pb_msg(3, b"		") + pb_str(4, "entity.attack")))
+                        pb_str(1, conn_id) + pb_str(2, "e-smoke") + pb_msg(3, b"		") + pb_str(4, "entity.attack")))
     got = ws.recv(2)
     if got is None:
         print("⑤ 客户端没收到 CallEntity —— 失败")
@@ -275,7 +292,7 @@ def main():
 
     # --- 踢人：HubKickOffClient → ClientDownlink.kick_off ---
     logic.send(envelope(3, "hub.kickOffClient", 0,
-                        pb_str(1, "c-1") + pb_msg(2, pb_u32(1, 4)) + pb_str(3, "冒烟踢人")))
+                        pb_str(1, conn_id) + pb_msg(2, pb_u32(1, 4)) + pb_str(3, "冒烟踢人")))
     got = ws.recv(2)
     kicked = False
     if got is not None:

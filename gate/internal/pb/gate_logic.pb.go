@@ -41,6 +41,142 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// 收到 `logic.hello` 之后的回包：**告诉这条链路是哪台 gate**。
+//
+// 逻辑节点可能同时连着多台 gate（一台 gate 一条 TCP），它必须知道每条链路对面是谁——
+// 实体记住自己在哪台 gate，下行才不会投错；跨 gate 顶号时也要靠它把踢人消息发到旧连接那台。
+type GateHello struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	GateName      string                 `protobuf:"bytes,1,opt,name=gate_name,json=gateName,proto3" json:"gate_name,omitempty"`
+	ProtoVer      uint32                 `protobuf:"varint,2,opt,name=proto_ver,json=protoVer,proto3" json:"proto_ver,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GateHello) Reset() {
+	*x = GateHello{}
+	mi := &file_gate_logic_proto_msgTypes[0]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GateHello) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GateHello) ProtoMessage() {}
+
+func (x *GateHello) ProtoReflect() protoreflect.Message {
+	mi := &file_gate_logic_proto_msgTypes[0]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GateHello.ProtoReflect.Descriptor instead.
+func (*GateHello) Descriptor() ([]byte, []int) {
+	return file_gate_logic_proto_rawDescGZIP(), []int{0}
+}
+
+func (x *GateHello) GetGateName() string {
+	if x != nil {
+		return x.GateName
+	}
+	return ""
+}
+
+func (x *GateHello) GetProtoVer() uint32 {
+	if x != nil {
+		return x.ProtoVer
+	}
+	return 0
+}
+
+// 会话目录的占位结果（回应 `HubClaimUser`）。
+//
+// `node_id` 为空 = 这个用户之前没有归属。否则是**占位前**的旧主人：新节点据此判断
+// "要不要通知旧节点退役"，以及是不是自己（本节点重登录 = 复用旧对象）。
+type GateOwnerInfo struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	NodeId        string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	GateName      string                 `protobuf:"bytes,2,opt,name=gate_name,json=gateName,proto3" json:"gate_name,omitempty"`
+	ConnId        string                 `protobuf:"bytes,3,opt,name=conn_id,json=connId,proto3" json:"conn_id,omitempty"`
+	EntityId      string                 `protobuf:"bytes,4,opt,name=entity_id,json=entityId,proto3" json:"entity_id,omitempty"`
+	Seq           uint64                 `protobuf:"varint,5,opt,name=seq,proto3" json:"seq,omitempty"` // **新**会话的序号（每次占位 +1）；旧节点只在收到的 seq 更大时才执行接管
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GateOwnerInfo) Reset() {
+	*x = GateOwnerInfo{}
+	mi := &file_gate_logic_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GateOwnerInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GateOwnerInfo) ProtoMessage() {}
+
+func (x *GateOwnerInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_gate_logic_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GateOwnerInfo.ProtoReflect.Descriptor instead.
+func (*GateOwnerInfo) Descriptor() ([]byte, []int) {
+	return file_gate_logic_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *GateOwnerInfo) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+func (x *GateOwnerInfo) GetGateName() string {
+	if x != nil {
+		return x.GateName
+	}
+	return ""
+}
+
+func (x *GateOwnerInfo) GetConnId() string {
+	if x != nil {
+		return x.ConnId
+	}
+	return ""
+}
+
+func (x *GateOwnerInfo) GetEntityId() string {
+	if x != nil {
+		return x.EntityId
+	}
+	return ""
+}
+
+func (x *GateOwnerInfo) GetSeq() uint64 {
+	if x != nil {
+		return x.Seq
+	}
+	return 0
+}
+
 // 玩家自己的实体创建：gate 在这里建立 `conn_id ⇄ entity_id` 的绑定。
 type HubCreatePlayerEntity struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -55,7 +191,7 @@ type HubCreatePlayerEntity struct {
 
 func (x *HubCreatePlayerEntity) Reset() {
 	*x = HubCreatePlayerEntity{}
-	mi := &file_gate_logic_proto_msgTypes[0]
+	mi := &file_gate_logic_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -67,7 +203,7 @@ func (x *HubCreatePlayerEntity) String() string {
 func (*HubCreatePlayerEntity) ProtoMessage() {}
 
 func (x *HubCreatePlayerEntity) ProtoReflect() protoreflect.Message {
-	mi := &file_gate_logic_proto_msgTypes[0]
+	mi := &file_gate_logic_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -80,7 +216,7 @@ func (x *HubCreatePlayerEntity) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HubCreatePlayerEntity.ProtoReflect.Descriptor instead.
 func (*HubCreatePlayerEntity) Descriptor() ([]byte, []int) {
-	return file_gate_logic_proto_rawDescGZIP(), []int{0}
+	return file_gate_logic_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *HubCreatePlayerEntity) GetConnId() string {
@@ -131,7 +267,7 @@ type HubCreateRemoteEntity struct {
 
 func (x *HubCreateRemoteEntity) Reset() {
 	*x = HubCreateRemoteEntity{}
-	mi := &file_gate_logic_proto_msgTypes[1]
+	mi := &file_gate_logic_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -143,7 +279,7 @@ func (x *HubCreateRemoteEntity) String() string {
 func (*HubCreateRemoteEntity) ProtoMessage() {}
 
 func (x *HubCreateRemoteEntity) ProtoReflect() protoreflect.Message {
-	mi := &file_gate_logic_proto_msgTypes[1]
+	mi := &file_gate_logic_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -156,7 +292,7 @@ func (x *HubCreateRemoteEntity) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HubCreateRemoteEntity.ProtoReflect.Descriptor instead.
 func (*HubCreateRemoteEntity) Descriptor() ([]byte, []int) {
-	return file_gate_logic_proto_rawDescGZIP(), []int{1}
+	return file_gate_logic_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *HubCreateRemoteEntity) GetConnId() string {
@@ -198,7 +334,7 @@ type HubDeleteRemoteEntity struct {
 
 func (x *HubDeleteRemoteEntity) Reset() {
 	*x = HubDeleteRemoteEntity{}
-	mi := &file_gate_logic_proto_msgTypes[2]
+	mi := &file_gate_logic_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -210,7 +346,7 @@ func (x *HubDeleteRemoteEntity) String() string {
 func (*HubDeleteRemoteEntity) ProtoMessage() {}
 
 func (x *HubDeleteRemoteEntity) ProtoReflect() protoreflect.Message {
-	mi := &file_gate_logic_proto_msgTypes[2]
+	mi := &file_gate_logic_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -223,7 +359,7 @@ func (x *HubDeleteRemoteEntity) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HubDeleteRemoteEntity.ProtoReflect.Descriptor instead.
 func (*HubDeleteRemoteEntity) Descriptor() ([]byte, []int) {
-	return file_gate_logic_proto_rawDescGZIP(), []int{2}
+	return file_gate_logic_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *HubDeleteRemoteEntity) GetConnId() string {
@@ -253,7 +389,7 @@ type HubRefreshEntity struct {
 
 func (x *HubRefreshEntity) Reset() {
 	*x = HubRefreshEntity{}
-	mi := &file_gate_logic_proto_msgTypes[3]
+	mi := &file_gate_logic_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -265,7 +401,7 @@ func (x *HubRefreshEntity) String() string {
 func (*HubRefreshEntity) ProtoMessage() {}
 
 func (x *HubRefreshEntity) ProtoReflect() protoreflect.Message {
-	mi := &file_gate_logic_proto_msgTypes[3]
+	mi := &file_gate_logic_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -278,7 +414,7 @@ func (x *HubRefreshEntity) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HubRefreshEntity.ProtoReflect.Descriptor instead.
 func (*HubRefreshEntity) Descriptor() ([]byte, []int) {
-	return file_gate_logic_proto_rawDescGZIP(), []int{3}
+	return file_gate_logic_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *HubRefreshEntity) GetConnId() string {
@@ -324,7 +460,7 @@ type HubKickOffClient struct {
 
 func (x *HubKickOffClient) Reset() {
 	*x = HubKickOffClient{}
-	mi := &file_gate_logic_proto_msgTypes[4]
+	mi := &file_gate_logic_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -336,7 +472,7 @@ func (x *HubKickOffClient) String() string {
 func (*HubKickOffClient) ProtoMessage() {}
 
 func (x *HubKickOffClient) ProtoReflect() protoreflect.Message {
-	mi := &file_gate_logic_proto_msgTypes[4]
+	mi := &file_gate_logic_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -349,7 +485,7 @@ func (x *HubKickOffClient) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HubKickOffClient.ProtoReflect.Descriptor instead.
 func (*HubKickOffClient) Descriptor() ([]byte, []int) {
-	return file_gate_logic_proto_rawDescGZIP(), []int{4}
+	return file_gate_logic_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *HubKickOffClient) GetConnId() string {
@@ -391,7 +527,7 @@ type GateForwardHubCallClient struct {
 
 func (x *GateForwardHubCallClient) Reset() {
 	*x = GateForwardHubCallClient{}
-	mi := &file_gate_logic_proto_msgTypes[5]
+	mi := &file_gate_logic_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -403,7 +539,7 @@ func (x *GateForwardHubCallClient) String() string {
 func (*GateForwardHubCallClient) ProtoMessage() {}
 
 func (x *GateForwardHubCallClient) ProtoReflect() protoreflect.Message {
-	mi := &file_gate_logic_proto_msgTypes[5]
+	mi := &file_gate_logic_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -416,7 +552,7 @@ func (x *GateForwardHubCallClient) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GateForwardHubCallClient.ProtoReflect.Descriptor instead.
 func (*GateForwardHubCallClient) Descriptor() ([]byte, []int) {
-	return file_gate_logic_proto_rawDescGZIP(), []int{5}
+	return file_gate_logic_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *GateForwardHubCallClient) GetConnId() string {
@@ -465,7 +601,7 @@ type GateForwardHubCallGroup struct {
 
 func (x *GateForwardHubCallGroup) Reset() {
 	*x = GateForwardHubCallGroup{}
-	mi := &file_gate_logic_proto_msgTypes[6]
+	mi := &file_gate_logic_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -477,7 +613,7 @@ func (x *GateForwardHubCallGroup) String() string {
 func (*GateForwardHubCallGroup) ProtoMessage() {}
 
 func (x *GateForwardHubCallGroup) ProtoReflect() protoreflect.Message {
-	mi := &file_gate_logic_proto_msgTypes[6]
+	mi := &file_gate_logic_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -490,7 +626,7 @@ func (x *GateForwardHubCallGroup) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GateForwardHubCallGroup.ProtoReflect.Descriptor instead.
 func (*GateForwardHubCallGroup) Descriptor() ([]byte, []int) {
-	return file_gate_logic_proto_rawDescGZIP(), []int{6}
+	return file_gate_logic_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *GateForwardHubCallGroup) GetConnId() []string {
@@ -537,7 +673,7 @@ type GateForwardHubCallGlobal struct {
 
 func (x *GateForwardHubCallGlobal) Reset() {
 	*x = GateForwardHubCallGlobal{}
-	mi := &file_gate_logic_proto_msgTypes[7]
+	mi := &file_gate_logic_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -549,7 +685,7 @@ func (x *GateForwardHubCallGlobal) String() string {
 func (*GateForwardHubCallGlobal) ProtoMessage() {}
 
 func (x *GateForwardHubCallGlobal) ProtoReflect() protoreflect.Message {
-	mi := &file_gate_logic_proto_msgTypes[7]
+	mi := &file_gate_logic_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -562,7 +698,7 @@ func (x *GateForwardHubCallGlobal) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GateForwardHubCallGlobal.ProtoReflect.Descriptor instead.
 func (*GateForwardHubCallGlobal) Descriptor() ([]byte, []int) {
-	return file_gate_logic_proto_rawDescGZIP(), []int{7}
+	return file_gate_logic_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *GateForwardHubCallGlobal) GetEntityId() string {
@@ -599,7 +735,7 @@ type GateDrain struct {
 
 func (x *GateDrain) Reset() {
 	*x = GateDrain{}
-	mi := &file_gate_logic_proto_msgTypes[8]
+	mi := &file_gate_logic_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -611,7 +747,7 @@ func (x *GateDrain) String() string {
 func (*GateDrain) ProtoMessage() {}
 
 func (x *GateDrain) ProtoReflect() protoreflect.Message {
-	mi := &file_gate_logic_proto_msgTypes[8]
+	mi := &file_gate_logic_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -624,7 +760,7 @@ func (x *GateDrain) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GateDrain.ProtoReflect.Descriptor instead.
 func (*GateDrain) Descriptor() ([]byte, []int) {
-	return file_gate_logic_proto_rawDescGZIP(), []int{8}
+	return file_gate_logic_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *GateDrain) GetGateId() string {
@@ -652,7 +788,16 @@ var File_gate_logic_proto protoreflect.FileDescriptor
 
 const file_gate_logic_proto_rawDesc = "" +
 	"\n" +
-	"\x10gate_logic.proto\x12\x02fw\x1a\fcommon.proto\"\xa1\x01\n" +
+	"\x10gate_logic.proto\x12\x02fw\x1a\fcommon.proto\"E\n" +
+	"\tGateHello\x12\x1b\n" +
+	"\tgate_name\x18\x01 \x01(\tR\bgateName\x12\x1b\n" +
+	"\tproto_ver\x18\x02 \x01(\rR\bprotoVer\"\x8d\x01\n" +
+	"\rGateOwnerInfo\x12\x17\n" +
+	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x1b\n" +
+	"\tgate_name\x18\x02 \x01(\tR\bgateName\x12\x17\n" +
+	"\aconn_id\x18\x03 \x01(\tR\x06connId\x12\x1b\n" +
+	"\tentity_id\x18\x04 \x01(\tR\bentityId\x12\x10\n" +
+	"\x03seq\x18\x05 \x01(\x04R\x03seq\"\xa1\x01\n" +
 	"\x15HubCreatePlayerEntity\x12\x17\n" +
 	"\aconn_id\x18\x01 \x01(\tR\x06connId\x12\x17\n" +
 	"\auser_id\x18\x02 \x01(\tR\x06userId\x12\x1b\n" +
@@ -711,26 +856,28 @@ func file_gate_logic_proto_rawDescGZIP() []byte {
 	return file_gate_logic_proto_rawDescData
 }
 
-var file_gate_logic_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
+var file_gate_logic_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
 var file_gate_logic_proto_goTypes = []any{
-	(*HubCreatePlayerEntity)(nil),    // 0: fw.HubCreatePlayerEntity
-	(*HubCreateRemoteEntity)(nil),    // 1: fw.HubCreateRemoteEntity
-	(*HubDeleteRemoteEntity)(nil),    // 2: fw.HubDeleteRemoteEntity
-	(*HubRefreshEntity)(nil),         // 3: fw.HubRefreshEntity
-	(*HubKickOffClient)(nil),         // 4: fw.HubKickOffClient
-	(*GateForwardHubCallClient)(nil), // 5: fw.GateForwardHubCallClient
-	(*GateForwardHubCallGroup)(nil),  // 6: fw.GateForwardHubCallGroup
-	(*GateForwardHubCallGlobal)(nil), // 7: fw.GateForwardHubCallGlobal
-	(*GateDrain)(nil),                // 8: fw.GateDrain
-	(*ErrorCode)(nil),                // 9: fw.ErrorCode
+	(*GateHello)(nil),                // 0: fw.GateHello
+	(*GateOwnerInfo)(nil),            // 1: fw.GateOwnerInfo
+	(*HubCreatePlayerEntity)(nil),    // 2: fw.HubCreatePlayerEntity
+	(*HubCreateRemoteEntity)(nil),    // 3: fw.HubCreateRemoteEntity
+	(*HubDeleteRemoteEntity)(nil),    // 4: fw.HubDeleteRemoteEntity
+	(*HubRefreshEntity)(nil),         // 5: fw.HubRefreshEntity
+	(*HubKickOffClient)(nil),         // 6: fw.HubKickOffClient
+	(*GateForwardHubCallClient)(nil), // 7: fw.GateForwardHubCallClient
+	(*GateForwardHubCallGroup)(nil),  // 8: fw.GateForwardHubCallGroup
+	(*GateForwardHubCallGlobal)(nil), // 9: fw.GateForwardHubCallGlobal
+	(*GateDrain)(nil),                // 10: fw.GateDrain
+	(*ErrorCode)(nil),                // 11: fw.ErrorCode
 }
 var file_gate_logic_proto_depIdxs = []int32{
-	9, // 0: fw.HubKickOffClient.error:type_name -> fw.ErrorCode
-	1, // [1:1] is the sub-list for method output_type
-	1, // [1:1] is the sub-list for method input_type
-	1, // [1:1] is the sub-list for extension type_name
-	1, // [1:1] is the sub-list for extension extendee
-	0, // [0:1] is the sub-list for field type_name
+	11, // 0: fw.HubKickOffClient.error:type_name -> fw.ErrorCode
+	1,  // [1:1] is the sub-list for method output_type
+	1,  // [1:1] is the sub-list for method input_type
+	1,  // [1:1] is the sub-list for extension type_name
+	1,  // [1:1] is the sub-list for extension extendee
+	0,  // [0:1] is the sub-list for field type_name
 }
 
 func init() { file_gate_logic_proto_init() }
@@ -745,7 +892,7 @@ func file_gate_logic_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_gate_logic_proto_rawDesc), len(file_gate_logic_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   9,
+			NumMessages:   11,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

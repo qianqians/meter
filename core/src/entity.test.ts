@@ -14,7 +14,7 @@ import { Entity, forwardCallClient, ERR, RpcError, type Downlink } from './entit
 /** 收集下行 Envelope 字节的假通道。 */
 function collector() {
   const sent: Uint8Array[] = [];
-  const down: Downlink = { send: (b) => sent.push(b) };
+  const down: Downlink = { send: (_gate, b) => sent.push(b) };
   const last = () => {
     const b = sent[sent.length - 1];
     if (!b) throw new Error('没有下行消息');

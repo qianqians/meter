@@ -12,7 +12,66 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file gate_logic.proto.
  */
 export const file_gate_logic: GenFile = /*@__PURE__*/
-  fileDesc("ChBnYXRlX2xvZ2ljLnByb3RvEgJmdyJyChVIdWJDcmVhdGVQbGF5ZXJFbnRpdHkSDwoHY29ubl9pZBgBIAEoCRIPCgd1c2VyX2lkGAIgASgJEhEKCWVudGl0eV9pZBgDIAEoCRITCgtlbnRpdHlfdHlwZRgEIAEoCRIPCgdjb250ZW50GAUgASgMImEKFUh1YkNyZWF0ZVJlbW90ZUVudGl0eRIPCgdjb25uX2lkGAEgASgJEhEKCWVudGl0eV9pZBgCIAEoCRITCgtlbnRpdHlfdHlwZRgDIAEoCRIPCgdjb250ZW50GAQgASgMIjsKFUh1YkRlbGV0ZVJlbW90ZUVudGl0eRIPCgdjb25uX2lkGAEgASgJEhEKCWVudGl0eV9pZBgCIAEoCSJcChBIdWJSZWZyZXNoRW50aXR5Eg8KB2Nvbm5faWQYASABKAkSEQoJZW50aXR5X2lkGAIgASgJEhMKC2VudGl0eV90eXBlGAMgASgJEg8KB2NvbnRlbnQYBCABKAwiVgoQSHViS2lja09mZkNsaWVudBIPCgdjb25uX2lkGAEgASgJEhwKBWVycm9yGAIgASgLMg0uZncuRXJyb3JDb2RlEhMKC3Byb21wdF9pbmZvGAMgASgJIl8KGEdhdGVGb3J3YXJkSHViQ2FsbENsaWVudBIPCgdjb25uX2lkGAEgASgJEhEKCWVudGl0eV9pZBgCIAEoCRIPCgdjb250ZW50GAMgASgMEg4KBm1ldGhvZBgEIAEoCSJeChdHYXRlRm9yd2FyZEh1YkNhbGxHcm91cBIPCgdjb25uX2lkGAEgAygJEhEKCWVudGl0eV9pZBgCIAEoCRIPCgdjb250ZW50GAMgASgMEg4KBm1ldGhvZBgEIAEoCSJOChhHYXRlRm9yd2FyZEh1YkNhbGxHbG9iYWwSEQoJZW50aXR5X2lkGAEgASgJEg8KB2NvbnRlbnQYAiABKAwSDgoGbWV0aG9kGAMgASgJIj4KCUdhdGVEcmFpbhIPCgdnYXRlX2lkGAEgASgJEhAKCGdyYWNlX21zGAIgASgNEg4KBnJlYXNvbhgDIAEoCUIUWhJtZXRlci9zY2hlbWEvcGI7cGJiBnByb3RvMw", [file_common]);
+  fileDesc("ChBnYXRlX2xvZ2ljLnByb3RvEgJmdyIxCglHYXRlSGVsbG8SEQoJZ2F0ZV9uYW1lGAEgASgJEhEKCXByb3RvX3ZlchgCIAEoDSJkCg1HYXRlT3duZXJJbmZvEg8KB25vZGVfaWQYASABKAkSEQoJZ2F0ZV9uYW1lGAIgASgJEg8KB2Nvbm5faWQYAyABKAkSEQoJZW50aXR5X2lkGAQgASgJEgsKA3NlcRgFIAEoBCJyChVIdWJDcmVhdGVQbGF5ZXJFbnRpdHkSDwoHY29ubl9pZBgBIAEoCRIPCgd1c2VyX2lkGAIgASgJEhEKCWVudGl0eV9pZBgDIAEoCRITCgtlbnRpdHlfdHlwZRgEIAEoCRIPCgdjb250ZW50GAUgASgMImEKFUh1YkNyZWF0ZVJlbW90ZUVudGl0eRIPCgdjb25uX2lkGAEgASgJEhEKCWVudGl0eV9pZBgCIAEoCRITCgtlbnRpdHlfdHlwZRgDIAEoCRIPCgdjb250ZW50GAQgASgMIjsKFUh1YkRlbGV0ZVJlbW90ZUVudGl0eRIPCgdjb25uX2lkGAEgASgJEhEKCWVudGl0eV9pZBgCIAEoCSJcChBIdWJSZWZyZXNoRW50aXR5Eg8KB2Nvbm5faWQYASABKAkSEQoJZW50aXR5X2lkGAIgASgJEhMKC2VudGl0eV90eXBlGAMgASgJEg8KB2NvbnRlbnQYBCABKAwiVgoQSHViS2lja09mZkNsaWVudBIPCgdjb25uX2lkGAEgASgJEhwKBWVycm9yGAIgASgLMg0uZncuRXJyb3JDb2RlEhMKC3Byb21wdF9pbmZvGAMgASgJIl8KGEdhdGVGb3J3YXJkSHViQ2FsbENsaWVudBIPCgdjb25uX2lkGAEgASgJEhEKCWVudGl0eV9pZBgCIAEoCRIPCgdjb250ZW50GAMgASgMEg4KBm1ldGhvZBgEIAEoCSJeChdHYXRlRm9yd2FyZEh1YkNhbGxHcm91cBIPCgdjb25uX2lkGAEgAygJEhEKCWVudGl0eV9pZBgCIAEoCRIPCgdjb250ZW50GAMgASgMEg4KBm1ldGhvZBgEIAEoCSJOChhHYXRlRm9yd2FyZEh1YkNhbGxHbG9iYWwSEQoJZW50aXR5X2lkGAEgASgJEg8KB2NvbnRlbnQYAiABKAwSDgoGbWV0aG9kGAMgASgJIj4KCUdhdGVEcmFpbhIPCgdnYXRlX2lkGAEgASgJEhAKCGdyYWNlX21zGAIgASgNEg4KBnJlYXNvbhgDIAEoCUIUWhJtZXRlci9zY2hlbWEvcGI7cGJiBnByb3RvMw", [file_common]);
+
+/**
+ * @generated from message fw.GateHello
+ */
+export type GateHello = Message<"fw.GateHello"> & {
+  /**
+   * @generated from field: string gate_name = 1;
+   */
+  gateName: string;
+
+  /**
+   * @generated from field: uint32 proto_ver = 2;
+   */
+  protoVer: number;
+};
+
+/**
+ * Describes the message fw.GateHello.
+ * Use `create(GateHelloSchema)` to create a new message.
+ */
+export const GateHelloSchema: GenMessage<GateHello> = /*@__PURE__*/
+  messageDesc(file_gate_logic, 0);
+
+/**
+ * @generated from message fw.GateOwnerInfo
+ */
+export type GateOwnerInfo = Message<"fw.GateOwnerInfo"> & {
+  /**
+   * @generated from field: string node_id = 1;
+   */
+  nodeId: string;
+
+  /**
+   * @generated from field: string gate_name = 2;
+   */
+  gateName: string;
+
+  /**
+   * @generated from field: string conn_id = 3;
+   */
+  connId: string;
+
+  /**
+   * @generated from field: string entity_id = 4;
+   */
+  entityId: string;
+
+  /**
+   * @generated from field: uint64 seq = 5;
+   */
+  seq: bigint;
+};
+
+/**
+ * Describes the message fw.GateOwnerInfo.
+ * Use `create(GateOwnerInfoSchema)` to create a new message.
+ */
+export const GateOwnerInfoSchema: GenMessage<GateOwnerInfo> = /*@__PURE__*/
+  messageDesc(file_gate_logic, 1);
 
 /**
  * @generated from message fw.HubCreatePlayerEntity
@@ -49,7 +108,7 @@ export type HubCreatePlayerEntity = Message<"fw.HubCreatePlayerEntity"> & {
  * Use `create(HubCreatePlayerEntitySchema)` to create a new message.
  */
 export const HubCreatePlayerEntitySchema: GenMessage<HubCreatePlayerEntity> = /*@__PURE__*/
-  messageDesc(file_gate_logic, 0);
+  messageDesc(file_gate_logic, 2);
 
 /**
  * @generated from message fw.HubCreateRemoteEntity
@@ -81,7 +140,7 @@ export type HubCreateRemoteEntity = Message<"fw.HubCreateRemoteEntity"> & {
  * Use `create(HubCreateRemoteEntitySchema)` to create a new message.
  */
 export const HubCreateRemoteEntitySchema: GenMessage<HubCreateRemoteEntity> = /*@__PURE__*/
-  messageDesc(file_gate_logic, 1);
+  messageDesc(file_gate_logic, 3);
 
 /**
  * @generated from message fw.HubDeleteRemoteEntity
@@ -103,7 +162,7 @@ export type HubDeleteRemoteEntity = Message<"fw.HubDeleteRemoteEntity"> & {
  * Use `create(HubDeleteRemoteEntitySchema)` to create a new message.
  */
 export const HubDeleteRemoteEntitySchema: GenMessage<HubDeleteRemoteEntity> = /*@__PURE__*/
-  messageDesc(file_gate_logic, 2);
+  messageDesc(file_gate_logic, 4);
 
 /**
  * @generated from message fw.HubRefreshEntity
@@ -135,7 +194,7 @@ export type HubRefreshEntity = Message<"fw.HubRefreshEntity"> & {
  * Use `create(HubRefreshEntitySchema)` to create a new message.
  */
 export const HubRefreshEntitySchema: GenMessage<HubRefreshEntity> = /*@__PURE__*/
-  messageDesc(file_gate_logic, 3);
+  messageDesc(file_gate_logic, 5);
 
 /**
  * @generated from message fw.HubKickOffClient
@@ -162,7 +221,7 @@ export type HubKickOffClient = Message<"fw.HubKickOffClient"> & {
  * Use `create(HubKickOffClientSchema)` to create a new message.
  */
 export const HubKickOffClientSchema: GenMessage<HubKickOffClient> = /*@__PURE__*/
-  messageDesc(file_gate_logic, 4);
+  messageDesc(file_gate_logic, 6);
 
 /**
  * @generated from message fw.GateForwardHubCallClient
@@ -194,7 +253,7 @@ export type GateForwardHubCallClient = Message<"fw.GateForwardHubCallClient"> & 
  * Use `create(GateForwardHubCallClientSchema)` to create a new message.
  */
 export const GateForwardHubCallClientSchema: GenMessage<GateForwardHubCallClient> = /*@__PURE__*/
-  messageDesc(file_gate_logic, 5);
+  messageDesc(file_gate_logic, 7);
 
 /**
  * @generated from message fw.GateForwardHubCallGroup
@@ -226,7 +285,7 @@ export type GateForwardHubCallGroup = Message<"fw.GateForwardHubCallGroup"> & {
  * Use `create(GateForwardHubCallGroupSchema)` to create a new message.
  */
 export const GateForwardHubCallGroupSchema: GenMessage<GateForwardHubCallGroup> = /*@__PURE__*/
-  messageDesc(file_gate_logic, 6);
+  messageDesc(file_gate_logic, 8);
 
 /**
  * @generated from message fw.GateForwardHubCallGlobal
@@ -253,7 +312,7 @@ export type GateForwardHubCallGlobal = Message<"fw.GateForwardHubCallGlobal"> & 
  * Use `create(GateForwardHubCallGlobalSchema)` to create a new message.
  */
 export const GateForwardHubCallGlobalSchema: GenMessage<GateForwardHubCallGlobal> = /*@__PURE__*/
-  messageDesc(file_gate_logic, 7);
+  messageDesc(file_gate_logic, 9);
 
 /**
  * @generated from message fw.GateDrain
@@ -280,5 +339,5 @@ export type GateDrain = Message<"fw.GateDrain"> & {
  * Use `create(GateDrainSchema)` to create a new message.
  */
 export const GateDrainSchema: GenMessage<GateDrain> = /*@__PURE__*/
-  messageDesc(file_gate_logic, 8);
+  messageDesc(file_gate_logic, 10);
 

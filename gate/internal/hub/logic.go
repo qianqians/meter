@@ -5,10 +5,13 @@
 package hub
 
 import (
+	"context"
 	"log"
+	"time"
 
 	pb "meter/gate/internal/pb"
 	"meter/gate/internal/session"
+	"meter/gate/internal/sessiondir"
 )
 
 // OnLogic 处理一条来自逻辑层的 Envelope。
@@ -27,7 +30,9 @@ func (h *Hub) OnLogic(nodeID string, env *pb.Envelope) {
 			ConnID: m.GetConnId(), UserID: m.GetUserId(), EntityID: m.GetEntityId(), NodeID: nodeID,
 		}); evicted != nil {
 			log.Printf("实体 %s 被新连接重新绑定，踢掉旧连接 %s", m.GetEntityId(), evicted.ConnID)
-			// 顶号：旧连接的 Unbind 拿不到会话了（已被挤掉），gate_mq 订阅必须在这里退
+			// 顶号：旧连接的 Unbind 拿不到会话了（已被挤掉），gate_mq 订阅必须在这里退；
+			// 会话本身先记下来——那条连接关闭时 RemoveClient 要用它告诉逻辑层“旧实体退役”。
+			h.noteEvicted(*evicted)
 			h.unsubscribeEntity(evicted.EntityID)
 			h.kick(evicted.ConnID, 4, "该账号已在别处登录")
 		}
@@ -37,6 +42,15 @@ func (h *Hub) OnLogic(nodeID string, env *pb.Envelope) {
 				EntityId: m.GetEntityId(), EntityType: m.GetEntityType(), Content: m.GetContent(),
 			}},
 		})
+		// 登录成功：把那条 REQUEST 回掉。顺序是「先给实体、再给结果」——
+		// 客户端收到 LoginResult 时本地已经有 entity_id 对应的视图了。
+		// resume_token 留空：它归根到底要由 gate 无状态校验（旧会话已不在内存里），P1 才签。
+		if req, ok := h.takeLogin(m.GetConnId()); ok {
+			h.answerLogin(m.GetConnId(), req, 0, &pb.LoginResult{
+				UserId:   m.GetUserId(),
+				EntityId: m.GetEntityId(),
+			})
+		}
 
 	case "hub.createRemoteEntity":
 		var m pb.HubCreateRemoteEntity
@@ -69,12 +83,29 @@ func (h *Hub) OnLogic(nodeID string, env *pb.Envelope) {
 			}},
 		})
 
+	case "hub.claimUser":
+		var m pb.HubClaimUser
+		if !h.unmarshalBody(env, &m) {
+			return
+		}
+		h.answerClaim(nodeID, env.GetCallbackId(), &m)
+
 	case "hub.kickOffClient":
 		var m pb.HubKickOffClient
 		if !h.unmarshalBody(env, &m) {
 			return
 		}
-		h.kick(m.GetConnId(), int(m.GetError().GetCode()), m.GetError().GetDetail())
+		// KickOff 按协议必须带错误码；没带时不能让它看起来像“成功”。
+		code := int(m.GetError().GetCode())
+		if code == 0 {
+			code = 1 // UNKNOWN
+		}
+		// 如果这条连接上有一条还在等裁决的登录：先把它回成失败（status ≠ 0、body 为空），
+		// 再发 KickOff 并断开。否则客户端要等到自己的超时才明白登录没成功。
+		if req, ok := h.takeLogin(m.GetConnId()); ok {
+			h.answerLogin(m.GetConnId(), req, uint32(code), nil)
+		}
+		h.kick(m.GetConnId(), code, m.GetError().GetDetail())
 
 	// 下面三条：外层 `Envelope.method` 是**路由方法**（gate 靠它知道 body 是什么），
 	// 真正的业务方法名在 body 的 `method` 字段里，gate 原样放进下发的 Envelope.method。
@@ -143,6 +174,49 @@ func (h *Hub) OnLogic(nodeID string, env *pb.Envelope) {
 	default:
 		h.stats.badEnvelope.Add(1)
 	}
+}
+
+// answerClaim 把会话目录"占位"给这条链路所属的节点，并回 GateOwnerInfo（**占位前**的主人）。
+//
+// 为什么由 gate 做：目录是跨 gate 共享的，节点自己不该直连 Redis（core 的依赖边界只有
+// Transport / node:*）；而占位必须原子（Lua），放一处比每台节点各写一遍更不容易分叉。
+// 未启用目录时回一个空的 GateOwnerInfo —— 逻辑层据此照常登录，只是不做跨节点接管。
+func (h *Hub) answerClaim(nodeID string, cb uint32, m *pb.HubClaimUser) {
+	info := &pb.GateOwnerInfo{}
+	status := uint32(0)
+
+	if h.dir != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		prev, seq, err := h.dir.Claim(ctx, m.GetUserId(), sessiondir.Entry{
+			Node: nodeID, Gate: h.gateName, Conn: m.GetConnId(), Entity: m.GetEntityId(),
+		})
+		cancel()
+		if err != nil {
+			log.Printf("会话目录占位失败 user=%s: %v", m.GetUserId(), err)
+			status = 1 // UNKNOWN：让逻辑层确定性地拒绝登录，而不是猜一个归属
+		} else {
+			// seq 是**新**会话的序号（每次占位 +1），逻辑层用它判断迟到的接管通知。
+			info.Seq = seq
+			if prev != nil {
+				info.NodeId = prev.Node
+				info.GateName = prev.Gate
+				info.ConnId = prev.Conn
+				info.EntityId = prev.Entity
+			}
+		}
+	}
+
+	var body []byte
+	if status == 0 {
+		body = mustMarshal(info)
+	}
+	h.sendEnvelopeToNode(nodeID, &pb.Envelope{
+		MsgType:    pb.MsgType_MSG_RESPONSE,
+		Method:     "gate.ownerInfo",
+		CallbackId: cb,
+		Status:     status,
+		Body:       body,
+	})
 }
 
 // sendCallEntity 把一次调用投给某条连接（客户端收到的 body 是 CallEntity）。

@@ -3,13 +3,17 @@
 // （subject 约定与 gate 的 internal/natsmq 逐字节一致，改动两侧要同步。）
 
 import { describe, expect, it } from 'vitest';
-import { createMq, gateSubject, logicSubject, type NatsLike } from './natsmq';
+import { createBus, createMq, gateSubject, logicSubject, type NatsLike } from './natsmq';
 
 /** 假连接：subscribe 登记回调，deliver 模拟 NATS 推送。 */
 function fakeNats() {
   const subs = new Map<string, { onData: (d: Uint8Array) => void; queue?: string; unsubscribed: boolean }>();
   const nats: NatsLike = {
-    publish: () => { /* 假连接不测 publish 路径 */ },
+    // publish 直接投给订阅者：节点总线（createBus）要的就是这条闭环
+    publish: (subject, data) => {
+      const s = subs.get(subject);
+      if (s && !s.unsubscribed) s.onData(data);
+    },
     subscribe(subject, onData, opts) {
       subs.set(subject, { onData, queue: opts?.queue, unsubscribed: false });
       return { unsubscribe: () => { const s = subs.get(subject); if (s) s.unsubscribed = true; } };
@@ -95,5 +99,25 @@ describe('createMq 消费', () => {
     const mq = createMq(f.nats);
     mq.consume(logicSubject('e1'), { queue: 'scene-1' });
     expect(f.queueOf(logicSubject('e1'))).toBe('scene-1');
+  });
+});
+
+describe('createBus（节点总线）', () => {
+  it('publish / subscribe 透传到 MQ，退订后不再收', async () => {
+    const f = fakeNats();
+    const mq = createMq(f.nats);
+    const bus = createBus(mq);
+
+    const got: string[] = [];
+    const off = bus.subscribe('hub_n1_mq', (b) => got.push(new TextDecoder().decode(b)));
+
+    bus.publish('hub_n1_mq', new TextEncoder().encode('replaced'));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(got).toEqual(['replaced']);
+
+    off();
+    bus.publish('hub_n1_mq', new TextEncoder().encode('late'));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(got).toEqual(['replaced']);
   });
 });

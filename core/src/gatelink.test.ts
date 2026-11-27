@@ -6,11 +6,16 @@ import { describe, expect, it } from 'vitest';
 import net from 'node:net';
 import { fromBinary, toBinary, create } from '@bufbuild/protobuf';
 import { EnvelopeSchema, MsgType } from './gen/envelope_pb';
+import { GateHelloSchema } from './gen/gate_logic_pb';
 import { encodeFrame } from './frame';
-import { connectGate, createLinkTransport } from './gatelink';
+import { connectGate, createLinkTransport, HELLO_ACK_METHOD } from './gatelink';
 
 const envBytes = (method: string, body = new Uint8Array()) =>
   toBinary(EnvelopeSchema, create(EnvelopeSchema, { msgType: MsgType.MSG_NOTIFY, method, body }));
+
+/** gate 的握手回包：告诉逻辑节点"这条链路是哪台 gate"。 */
+const ackBytes = (gateName = 'g-test') =>
+  envBytes(HELLO_ACK_METHOD, toBinary(GateHelloSchema, create(GateHelloSchema, { gateName, protoVer: 1 })));
 
 describe('createLinkTransport（离线）', () => {
   it('feed 半包：帧不完整时缓冲，完整后投递 payload', () => {
@@ -65,7 +70,7 @@ describe('connectGate（本机 TCP，假 gate）', () => {
       link.onData((payload) => {
         if (!announced) {
           announced = true;
-          link.send(envBytes('gate.ready'));
+          link.send(ackBytes('g-echo'));
           return;
         }
         link.send(payload); // 回显
@@ -75,17 +80,17 @@ describe('connectGate（本机 TCP，假 gate）', () => {
     await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
     const addr = srv.address() as net.AddressInfo;
 
-    const transport = await connectGate({ host: '127.0.0.1', port: addr.port, nodeId: 'n-test' });
-    expect(transport).toBeDefined();
+    const link = await connectGate({ host: '127.0.0.1', port: addr.port, nodeId: 'n-test' });
+    expect(link.name).toBe('g-echo'); // 名字来自握手回包
 
     // 调用方 onData（就绪即注册，赶在任何业务帧之前）+ 回显闭环
     const got: string[] = [];
     await new Promise<void>((resolve) => {
-      transport.onData((b) => {
+      link.transport.onData((b) => {
         got.push(fromBinary(EnvelopeSchema, b).method);
         resolve();
       });
-      transport.send(envBytes('echo.me'));
+      link.transport.send(envBytes('echo.me'));
     });
     expect(got).toContain('echo.me');
     srv.close();
@@ -98,7 +103,7 @@ describe('connectGate（本机 TCP，假 gate）', () => {
       link.onData((payload) => {
         if (!hello) {
           hello = payload;
-          link.send(envBytes('gate.ready'));
+          link.send(ackBytes());
         }
       });
       sock.on('data', (c: Buffer) => link.feed(c));
@@ -106,12 +111,11 @@ describe('connectGate（本机 TCP，假 gate）', () => {
     await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
     const addr = srv.address() as net.AddressInfo;
 
-    const transport = await connectGate({ host: '127.0.0.1', port: addr.port, nodeId: 'node-xyz' });
-    await new Promise((r) => setTimeout(r, 100)); // 等 hello 到达假 gate（写出即就绪，不含对端确认）
+    const link = await connectGate({ host: '127.0.0.1', port: addr.port, nodeId: 'node-xyz' });
     const env = fromBinary(EnvelopeSchema, hello!);
     expect(env.method).toBe('logic.hello');
     expect(new TextDecoder().decode(env.body)).toBe('node-xyz');
-    transport.send(envBytes('bye')); // 保活，等断开
+    link.transport.send(envBytes('bye')); // 保活，等断开
     srv.close();
   }, 10_000);
 

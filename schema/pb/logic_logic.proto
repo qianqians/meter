@@ -43,6 +43,18 @@ option go_package = "meter/schema/pb;pb";
 //   · `src_hub` 让收方能回发通知、也能做环路检测（A→B→A 的链要能断）；
 //   · 目标实体属于业务语义（"让 1001 号玩家处理这件事"），放在 `content` 里由业务解，
 //     框架不替业务决定路由粒度。
+// 顶号通知（hub → hub，走 NATS `hub_{nodeId}_mq`）：这个账号已经在别处登录了。
+//
+// 收方是**旧节点**：它用自己的那条 gate 链路踢掉旧连接，然后让旧实体退役（`replaced`）。
+// 带 `seq` 是为了让迟到的通知被忽略——只有比本地新才执行。
+message HubSessionReplaced {
+  string user_id = 1;
+  string entity_id = 2;
+  string gate_name = 3;   // 旧会话所在的 gate（收方据此选链路）
+  string conn_id = 4;     // 旧连接
+  uint64 seq = 5;
+}
+
 message CrossCallNotify {
   string src_hub = 1;              // 发起方 hub 的标识（回发与环路检测用）
   string method = 2;               // 目标方法名（由目标节点自身分发）

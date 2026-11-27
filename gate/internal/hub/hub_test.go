@@ -51,7 +51,7 @@ func (f *fakePeer) count() int { f.mu.Lock(); defer f.mu.Unlock(); return len(f.
 
 func newHub() (*Hub, *session.Table) {
 	sess := session.New()
-	return New(sess, func() uint32 { return 42 }, "gate-test", nil), sess
+	return New(sess, func() uint32 { return 42 }, "gate-test", nil, Options{}), sess
 }
 
 func mustBody(t *testing.T, m proto.Message) []byte {
@@ -353,7 +353,7 @@ func (f *fakeMQ) subscribed(subject string) bool {
 func TestMqBypassDeliversDown(t *testing.T) {
 	mq := newFakeMQ()
 	sess := session.New()
-	h := New(sess, func() uint32 { return 42 }, "gate-test", mq)
+	h := New(sess, func() uint32 { return 42 }, "gate-test", mq, Options{})
 	client := &fakePeer{}
 	h.AddClient("c1", client)
 
@@ -387,7 +387,7 @@ func TestMqBypassDeliversDown(t *testing.T) {
 func TestMqEvictionResubscribes(t *testing.T) {
 	mq := newFakeMQ()
 	sess := session.New()
-	h := New(sess, func() uint32 { return 42 }, "gate-test", mq)
+	h := New(sess, func() uint32 { return 42 }, "gate-test", mq, Options{})
 	old, fresh := &fakePeer{}, &fakePeer{}
 	h.AddClient("old", old)
 	h.AddClient("new", fresh)
@@ -420,7 +420,7 @@ func TestMqEvictionResubscribes(t *testing.T) {
 func TestMqBadEnvelopeCounted(t *testing.T) {
 	mq := newFakeMQ()
 	sess := session.New()
-	h := New(sess, func() uint32 { return 42 }, "gate-test", mq)
+	h := New(sess, func() uint32 { return 42 }, "gate-test", mq, Options{})
 	h.AddClient("c1", &fakePeer{})
 	h.OnLogic("n1", &pb.Envelope{Method: "hub.createPlayerEntity", Body: mustBody(t,
 		&pb.HubCreatePlayerEntity{ConnId: "c1", UserId: "u1", EntityId: "e1"})})
@@ -472,5 +472,253 @@ func TestLogicRequestStillRequest(t *testing.T) {
 	got := client.last()
 	if got.GetMsgType() != pb.MsgType_MSG_REQUEST || got.GetCallbackId() != 11 {
 		t.Fatalf("服务端调客户端仍是 REQUEST，实际 %+v", got)
+	}
+}
+
+// ---------------- 登录闭环 / 心跳 / ping ----------------
+
+func newHubWithOpts(opts Options) *Hub {
+	sess := session.New()
+	return New(sess, func() uint32 { return 42 }, "gate-test", nil, opts)
+}
+
+// at 取第 i 条下行 Envelope（按发送顺序；空的 pong 帧解出来是空 Envelope）。
+func (f *fakePeer) at(i int) *pb.Envelope {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if i < 0 || i >= len(f.raw) {
+		return nil
+	}
+	var env pb.Envelope
+	if err := proto.Unmarshal(f.raw[i], &env); err != nil {
+		return nil
+	}
+	return &env
+}
+
+func downlinkOf(t *testing.T, env *pb.Envelope) *pb.ClientDownlink {
+	t.Helper()
+	if env == nil {
+		t.Fatal("没有下行")
+	}
+	var down pb.ClientDownlink
+	if err := proto.Unmarshal(env.GetBody(), &down); err != nil {
+		t.Fatalf("下行 body 不是 ClientDownlink: %v", err)
+	}
+	return &down
+}
+
+// 连上就发 NotifyConnID：conn_id / proto_ver / 服务端时间 / 心跳间隔 / 单帧上限
+func TestOnConnectedSendsNotifyConnID(t *testing.T) {
+	h := newHubWithOpts(Options{HeartbeatMS: 30_000})
+	client := &fakePeer{}
+	h.AddClient("c1", client)
+	h.OnConnected("c1")
+
+	env := client.last()
+	if env.GetMsgType() != pb.MsgType_MSG_NOTIFY || env.GetMethod() != "" {
+		t.Fatalf("NotifyConnID 应是 NOTIFY 且无业务方法名: %+v", env)
+	}
+	hello := downlinkOf(t, env).GetConnId()
+	if hello == nil {
+		t.Fatal("下行不是 ClientDownlink.conn_id")
+	}
+	if hello.GetConnId() != "c1" {
+		t.Fatalf("conn_id 不对: %q", hello.GetConnId())
+	}
+	if hello.GetProtoVer() != ProtoVersion {
+		t.Fatalf("proto_ver 不对: %d", hello.GetProtoVer())
+	}
+	if hello.GetServerTimeMs() != 42 {
+		t.Fatalf("server_time_ms 应取 now(): %d", hello.GetServerTimeMs())
+	}
+	if hello.GetHeartbeatMs() != 30_000 {
+		t.Fatalf("heartbeat_ms 应来自 Options: %d", hello.GetHeartbeatMs())
+	}
+	if hello.GetMaxFrameBytes() != frame.MaxPayload {
+		t.Fatalf("max_frame_bytes 应是解码器强制的上限: %d", hello.GetMaxFrameBytes())
+	}
+}
+
+// 登录成功：hub.createPlayerEntity → 先给实体、再回 LoginResult（原 callback_id）
+func TestLoginAnsweredOnCreatePlayerEntity(t *testing.T) {
+	h, _ := newHub()
+	client, logic := &fakePeer{}, &fakePeer{}
+	h.AddClient("c1", client)
+	h.AddLogic("n1", logic)
+
+	login := &pb.ClientUplink{Body: &pb.ClientUplink_Login{Login: &pb.Login{Token: "tk"}}}
+	h.OnClient("c1", &pb.Envelope{MsgType: pb.MsgType_MSG_REQUEST, Method: "client.login", CallbackId: 7}, login)
+
+	fwd := logic.last()
+	if fwd.GetMethod() != "gate.clientLogin" || fwd.GetCallbackId() != 7 {
+		t.Fatalf("登录应原样转给逻辑层（含 callback_id）: %+v", fwd)
+	}
+
+	body := mustBody(t, &pb.HubCreatePlayerEntity{ConnId: "c1", UserId: "u1", EntityId: "e1", EntityType: "player"})
+	h.OnLogic("n1", &pb.Envelope{MsgType: pb.MsgType_MSG_NOTIFY, Method: "hub.createPlayerEntity", Body: body})
+
+	if client.count() != 2 {
+		t.Fatalf("应收到 create_player + login 回包两条，实际 %d", client.count())
+	}
+	if cp := downlinkOf(t, client.at(0)).GetCreatePlayer(); cp.GetEntityId() != "e1" {
+		t.Fatalf("第一条应是 CreatePlayerEntity: %+v", cp)
+	}
+
+	env := client.at(1)
+	if env.GetMsgType() != pb.MsgType_MSG_RESPONSE || env.GetCallbackId() != 7 || env.GetStatus() != 0 {
+		t.Fatalf("第二条应是登录的 RESPONSE（原 callback_id、status=0）: %+v", env)
+	}
+	if env.GetMethod() != "client.login" {
+		t.Fatalf("回包的 method 应回显登录请求: %q", env.GetMethod())
+	}
+	lr := downlinkOf(t, env).GetLogin()
+	if lr.GetUserId() != "u1" || lr.GetEntityId() != "e1" {
+		t.Fatalf("LoginResult 字段不对: %+v", lr)
+	}
+	if len(lr.GetResumeToken()) != 0 || lr.GetFullResync() {
+		t.Fatalf("本次 resume_token 留空、full_resync=false: %+v", lr)
+	}
+}
+
+// 登录失败：先回 status（body 为空），再 KickOff
+func TestLoginRejectedAnswersStatusThenKick(t *testing.T) {
+	h, _ := newHub()
+	client, logic := &fakePeer{}, &fakePeer{}
+	h.AddClient("c1", client)
+	h.AddLogic("n1", logic)
+
+	h.OnClient("c1", &pb.Envelope{MsgType: pb.MsgType_MSG_REQUEST, Method: "client.login", CallbackId: 9},
+		&pb.ClientUplink{Body: &pb.ClientUplink_Login{Login: &pb.Login{Token: "bad"}}})
+
+	body := mustBody(t, &pb.HubKickOffClient{
+		ConnId: "c1",
+		Error:  &pb.ErrorCode{Code: 4, Detail: "该账号已在别处登录"},
+	})
+	h.OnLogic("n1", &pb.Envelope{MsgType: pb.MsgType_MSG_NOTIFY, Method: "hub.kickOffClient", Body: body})
+
+	if client.count() != 2 {
+		t.Fatalf("应收到登录失败回包 + KickOff 两条，实际 %d", client.count())
+	}
+	env := client.at(0)
+	if env.GetMsgType() != pb.MsgType_MSG_RESPONSE || env.GetCallbackId() != 9 || env.GetStatus() != 4 {
+		t.Fatalf("第一条应是 status=4 的 RESPONSE: %+v", env)
+	}
+	if len(env.GetBody()) != 0 {
+		t.Fatalf("失败时 body 应为空: %v", env.GetBody())
+	}
+	if ko := downlinkOf(t, client.at(1)).GetKickOff(); ko.GetError().GetCode() != 4 {
+		t.Fatalf("第二条应是 KickOff 且带错误码: %+v", ko)
+	}
+}
+
+// 心跳：gate 直接答（原 callback_id），不再转给逻辑层
+func TestHeartbeatAnsweredByGate(t *testing.T) {
+	h, _ := newHub()
+	client, logic := &fakePeer{}, &fakePeer{}
+	h.AddClient("c1", client)
+	h.AddLogic("n1", logic)
+
+	h.OnClient("c1", &pb.Envelope{MsgType: pb.MsgType_MSG_REQUEST, Method: "client.heartbeat", CallbackId: 3},
+		&pb.ClientUplink{Body: &pb.ClientUplink_Heartbeat{Heartbeat: &pb.HeartBeat{ClientTimeMs: 111}}})
+
+	if logic.count() != 0 {
+		t.Fatal("心跳不该转给逻辑层")
+	}
+	env := client.last()
+	if env.GetMsgType() != pb.MsgType_MSG_RESPONSE || env.GetCallbackId() != 3 {
+		t.Fatalf("心跳应是 RESPONSE + 原 callback_id: %+v", env)
+	}
+	hb := downlinkOf(t, env).GetHeartbeat()
+	if hb.GetClientTimeMs() != 111 || hb.GetServerTimeMs() != 42 {
+		t.Fatalf("HeartBeatResult 字段不对: %+v", hb)
+	}
+}
+
+// len == 0 的帧是保活帧：原样回一个空帧
+func TestEmptyFramePong(t *testing.T) {
+	h, _ := newHub()
+	client := &fakePeer{}
+	h.AddClient("c1", client)
+
+	h.OnClientFrame("c1", frame.Frame{TS: 1})
+
+	if client.count() != 1 {
+		t.Fatalf("应回一个 pong，实际 %d 条下行", client.count())
+	}
+	if len(client.raw[0]) != 0 {
+		t.Fatalf("pong 应是空 payload（len=0），实际 %d 字节", len(client.raw[0]))
+	}
+}
+
+// 顶号收尾：旧连接真正关闭时，断开通知要带 user/entity 且投给**旧会话所属的节点**
+func TestEvictedConnDisconnectReachesOldNode(t *testing.T) {
+	h, _ := newHub()
+	oldConn, newConn := &fakePeer{}, &fakePeer{}
+	oldNode, newNode := &fakePeer{}, &fakePeer{}
+	h.AddClient("old", oldConn)
+	h.AddClient("new", newConn)
+	h.AddLogic("n-old", oldNode)
+	h.AddLogic("n-new", newNode)
+
+	mk := func(connID string) []byte {
+		return mustBody(t, &pb.HubCreatePlayerEntity{ConnId: connID, UserId: "u1", EntityId: "e1"})
+	}
+	h.OnLogic("n-old", &pb.Envelope{Method: "hub.createPlayerEntity", Body: mk("old")})
+	h.OnLogic("n-new", &pb.Envelope{Method: "hub.createPlayerEntity", Body: mk("new")})
+
+	// 旧连接此刻才关闭（会话已在 Bind 时被挤走）
+	h.RemoveClient("old")
+
+	got := oldNode.last()
+	if got == nil {
+		t.Fatal("旧节点没收到 ClientDisconnect")
+	}
+	if got.GetMethod() != "gate.clientDisconnect" {
+		t.Fatalf("路由方法不对: %q", got.GetMethod())
+	}
+	var d pb.ClientDisconnect
+	if err := proto.Unmarshal(got.GetBody(), &d); err != nil {
+		t.Fatal(err)
+	}
+	if d.GetUserId() != "u1" || d.GetEntityId() != "e1" {
+		t.Fatalf("顶号的断开必须带 user/entity（否则旧实体不退役）: %+v", &d)
+	}
+	if d.GetError().GetCode() != 4 {
+		t.Fatalf("顶号应带错误码 4（DUPLICATE_LOGIN）: %+v", d.GetError())
+	}
+
+	// 新节点不该收到这条（它根本不知道旧连接）
+	for _, raw := range newNode.raw {
+		var env pb.Envelope
+		if err := proto.Unmarshal(raw, &env); err != nil {
+			continue
+		}
+		if env.GetMethod() == "gate.clientDisconnect" {
+			t.Fatal("断开通知投给了错的节点")
+		}
+	}
+}
+
+// 普通断开：错误码为空（0），行为不变
+func TestNormalDisconnectHasNoErrorCode(t *testing.T) {
+	h, _ := newHub()
+	client, logic := &fakePeer{}, &fakePeer{}
+	h.AddClient("c1", client)
+	h.AddLogic("n1", logic)
+
+	h.OnLogic("n1", &pb.Envelope{Method: "hub.createPlayerEntity",
+		Body: mustBody(t, &pb.HubCreatePlayerEntity{ConnId: "c1", UserId: "u1", EntityId: "e1"})})
+	h.RemoveClient("c1")
+
+	var d pb.ClientDisconnect
+	if err := proto.Unmarshal(logic.last().GetBody(), &d); err != nil {
+		t.Fatal(err)
+	}
+	if d.GetError().GetCode() != 0 {
+		t.Fatalf("普通断开不该带错误码: %+v", d.GetError())
+	}
+	if d.GetEntityId() != "e1" {
+		t.Fatalf("普通断开也要带 entity: %+v", &d)
 	}
 }

@@ -31,6 +31,7 @@ import (
 	"meter/gate/internal/natsmq"
 	"meter/gate/internal/registry"
 	"meter/gate/internal/session"
+	"meter/gate/internal/sessiondir"
 )
 
 func main() {
@@ -77,7 +78,24 @@ func main() {
 		}
 	}
 
-	h := hub.New(sess, nowMs, gateName, mq)
+	// ---------- 跨 gate 会话目录（可选，Redis） ----------
+	//
+	// 只影响**跨 gate** 顶号：同 gate 内的顶号靠会话表就够。但一旦启用，它是登录路径的一部分
+	// ——连不上就不该假装健康地启动（否则登录会静默退化成"两个写者"）。
+	// 注意类型：声明成接口而不是 *sessiondir.Dir —— 否则"nil 指针装进非空接口"会让
+	// hub 里的 `dir != nil` 为真，调用时 panic。
+	var dir hub.Directory
+	if cfg.Redis.Enabled {
+		d, derr := sessiondir.Open(cfg.Redis.CacheURL, cfg.Redis.PoolSize, cfg.Redis.DialTimeoutMs, cfg.SessionTTL())
+		if derr != nil {
+			log.Fatalf("会话目录不可用（redis.enabled=true）: %v", derr)
+		}
+		dir = d
+		defer d.Close()
+		log.Printf("会话目录已启用：%s（TTL %s）", cfg.Redis.CacheURL, cfg.SessionTTL())
+	}
+
+	h := hub.New(sess, nowMs, gateName, mq, hub.Options{HeartbeatMS: heartbeatMS(cfg), Dir: dir})
 
 	// ---------- consul 注册与状态上报 ----------
 	var reg registry.Registry = registry.Nop{}
@@ -134,6 +152,22 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// 会话目录续期：TTL/3 一次。gate 崩溃后记录自然过期，旧节点不会被永久当成会话主人。
+	if dir != nil {
+		go func() {
+			t := time.NewTicker(cfg.SessionTTL() / 3)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					h.RefreshSessions()
+				}
+			}
+		}()
+	}
 
 	go func() {
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -202,6 +236,16 @@ func main() {
 	}
 	log.Println("退出")
 	os.Exit(0)
+}
+
+// heartbeatMS 是下发给客户端的建议心跳间隔：读超时 / 3。
+// 三次没发就算断——既不会刚好卡在超时线上，也不会把保活帧发得过密。
+func heartbeatMS(cfg config.Config) uint32 {
+	ms := cfg.Listen.ReadTimeoutS * 1000 / 3
+	if ms < 1000 {
+		ms = 1000
+	}
+	return uint32(ms)
 }
 
 // statusLine 是上报给 consul（以及日志）的一行状态，刻意保持人能读：
